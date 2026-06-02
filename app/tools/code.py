@@ -1,15 +1,12 @@
 """Code interpreter (Sprint 2.4 · E2B) — ejecución aislada de Python.
 
-Gateado: el modelo lo usa solo cuando necesita CÁLCULO o manipulación de datos
-(plazos, fechas, tablas, parsing). microVM Firecracker efímera, se destruye al terminar.
-
-Usa el Sandbox SÍNCRONO en `asyncio.to_thread` (no AsyncSandbox) para no interferir
-con el cliente httpx de Storage en el mismo request — ver app/tools/codedoc.py.
+Gateado: el modelo lo usa solo cuando necesita CÁLCULO o manipulación de datos.
+Corre el AsyncSandbox en un HILO con su propio event loop (aislado del request)
+para no romper el cliente httpx de Storage — ver app/tools/codedoc.py.
 """
 from __future__ import annotations
 
 import asyncio
-import os
 
 from ..config import settings
 
@@ -20,40 +17,38 @@ RUN_CODE_SCHEMA = {
 }
 
 
-def _run_sync(code: str, api_key: str) -> str:
-    try:
-        from e2b_code_interpreter import Sandbox
-    except Exception as exc:  # noqa: BLE001
-        return f"[run_code: SDK E2B no disponible: {exc}]"
-    os.environ["E2B_API_KEY"] = api_key  # el Sandbox síncrono lee la key del entorno
-    sbx = None
-    try:
-        sbx = Sandbox()
-        ex = sbx.run_code(code)
-        out = "".join(ex.logs.stdout) if ex.logs and ex.logs.stdout else ""
-        err = "".join(ex.logs.stderr) if ex.logs and ex.logs.stderr else ""
-        res = str(ex.text) if getattr(ex, "text", None) else ""
-        if getattr(ex, "error", None):
-            err += f"\n{ex.error.name}: {ex.error.value}"
-        parts = []
-        if out:
-            parts.append(f"stdout:\n{out}")
-        if res:
-            parts.append(f"result:\n{res}")
-        if err.strip():
-            parts.append(f"stderr:\n{err}")
-        return ("\n".join(parts) or "[sin salida]")[:4000]
-    except Exception as exc:  # noqa: BLE001
-        return f"[run_code error: {exc}]"
-    finally:
-        if sbx is not None:
+def _run_blocking(code: str, api_key: str) -> str:
+    async def _go():
+        from e2b_code_interpreter import AsyncSandbox
+        sbx = await AsyncSandbox.create(api_key=api_key)
+        try:
+            ex = await sbx.run_code(code)
+            out = "".join(ex.logs.stdout) if ex.logs and ex.logs.stdout else ""
+            err = "".join(ex.logs.stderr) if ex.logs and ex.logs.stderr else ""
+            res = str(ex.text) if getattr(ex, "text", None) else ""
+            if getattr(ex, "error", None):
+                err += f"\n{ex.error.name}: {ex.error.value}"
+            parts = []
+            if out:
+                parts.append(f"stdout:\n{out}")
+            if res:
+                parts.append(f"result:\n{res}")
+            if err.strip():
+                parts.append(f"stderr:\n{err}")
+            return ("\n".join(parts) or "[sin salida]")[:4000]
+        finally:
             try:
-                sbx.kill()
+                await sbx.kill()
             except Exception:  # noqa: BLE001
                 pass
+
+    try:
+        return asyncio.run(_go())
+    except Exception as exc:  # noqa: BLE001
+        return f"[run_code error: {exc}]"
 
 
 async def run_code(code: str) -> str:
     if not settings.e2b_api_key:
         return "[run_code: E2B no configurado]"
-    return await asyncio.to_thread(_run_sync, code, settings.e2b_api_key)
+    return await asyncio.to_thread(_run_blocking, code, settings.e2b_api_key)

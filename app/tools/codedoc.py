@@ -3,15 +3,14 @@
 Da formato AVANZADO (numeración, estilos, tablas) controlado por el modelo. El
 código debe guardar en /tmp/out.docx.
 
-IMPORTANTE: usamos el Sandbox SÍNCRONO de E2B dentro de `asyncio.to_thread`, no el
-AsyncSandbox. El AsyncSandbox corre httpx en el event loop del request y, al cerrarse,
-rompía el cliente httpx de Storage ("Attempted to send an sync request with an
-AsyncClient instance"). Aislarlo en un hilo evita esa interferencia.
+AISLAMIENTO: el AsyncSandbox de E2B funciona, pero si corre en el event loop del
+request, al cerrarse rompe el cliente httpx de Storage ("Attempted to send an sync
+request with an AsyncClient instance"). Lo corremos en un HILO con su PROPIO event
+loop (`asyncio.run` dentro de `asyncio.to_thread`), totalmente aislado.
 """
 from __future__ import annotations
 
 import asyncio
-import os
 
 from ..config import settings
 
@@ -41,37 +40,33 @@ _PREP = (
 )
 
 
-def _build_sync(code: str, api_key: str) -> tuple[bytes | None, str | None]:
-    """Corre en un hilo (sync E2B Sandbox), aislado del event loop principal."""
-    try:
-        from e2b_code_interpreter import Sandbox
-    except Exception as exc:  # noqa: BLE001
-        return None, f"SDK E2B no disponible: {exc}"
-    os.environ["E2B_API_KEY"] = api_key  # el Sandbox síncrono lee la key del entorno
-    sbx = None
-    try:
-        sbx = Sandbox()
-        ex = sbx.run_code(_PREP + (code or ""))
-        if getattr(ex, "error", None):
-            return None, f"{ex.error.name}: {ex.error.value}"
-        data = sbx.files.read("/tmp/out.docx", format="bytes")
-        if isinstance(data, str):
-            data = data.encode("latin-1", "ignore")
-        data = bytes(data) if data else b""
-        if not data:
-            return None, "el código no produjo /tmp/out.docx"
-        return data, None
-    except Exception as exc:  # noqa: BLE001
-        return None, str(exc)
-    finally:
-        if sbx is not None:
+def _build_blocking(code: str, api_key: str) -> tuple[bytes | None, str | None]:
+    """Corre en un hilo con su propio event loop (aislado del request)."""
+    async def _go():
+        from e2b_code_interpreter import AsyncSandbox
+        sbx = await AsyncSandbox.create(api_key=api_key)
+        try:
+            ex = await sbx.run_code(_PREP + (code or ""))
+            if getattr(ex, "error", None):
+                return None, f"{ex.error.name}: {ex.error.value}"
+            data = await sbx.files.read("/tmp/out.docx", format="bytes")
+            if isinstance(data, str):
+                data = data.encode("latin-1", "ignore")
+            data = bytes(data) if data else b""
+            return (data, None) if data else (None, "el código no produjo /tmp/out.docx")
+        finally:
             try:
-                sbx.kill()
+                await sbx.kill()
             except Exception:  # noqa: BLE001
                 pass
+
+    try:
+        return asyncio.run(_go())
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
 
 
 async def build(code: str) -> tuple[bytes | None, str | None]:
     if not settings.e2b_api_key:
         return None, "E2B no configurado"
-    return await asyncio.to_thread(_build_sync, code or "", settings.e2b_api_key)
+    return await asyncio.to_thread(_build_blocking, code or "", settings.e2b_api_key)
