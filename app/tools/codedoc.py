@@ -18,16 +18,29 @@ _DOCX_GUIDE = (
     "Escribe código JavaScript con la librería docx-js (Node). Reglas:\n"
     "1. `const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, AlignmentType, "
     "HeadingLevel, BorderStyle, PageNumber, Footer, Header, LevelFormat, WidthType, TabStopType, "
-    "TabStopPosition } = require('docx'); const fs = require('fs');`\n"
-    "2. Construye `const doc = new Document({ sections: [{ properties: { page: { size: { width: 12240, "
-    "height: 15840 }, margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children: [...] }] });`\n"
-    "   CRÍTICO: docx-js usa A4 por defecto — fija SIEMPRE US Letter (width 12240, height 15840) como arriba.\n"
-    "3. Fuente Arial, tamaño 24 (12pt) en los TextRun. Títulos en negrita.\n"
-    "4. Para campos a completar usa placeholders en NEGRITA entre corchetes, ej. "
-    "`new TextRun({ text: '[NOMBRE DEL PODERDANTE]', bold: true })`.\n"
-    "5. TERMINA SIEMPRE con: `Packer.toBuffer(doc).then(b => fs.writeFileSync('/home/user/out.docx', b));`\n"
-    "6. NO envuelvas el código en funciones async sin invocarlas; el archivo DEBE quedar escrito en "
-    "/home/user/out.docx al ejecutar `node`."
+    "TabStopPosition } = require('docx');`\n"
+    "2. Construye, AL NIVEL SUPERIOR (no dentro de funciones), una variable llamada exactamente `doc`: "
+    "`const doc = new Document({ sections: [{ properties: { page: { size: { width: 12240, height: 15840 }, "
+    "margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children: [...] }] });`\n"
+    "   CRÍTICO: docx-js usa A4 por defecto — fija SIEMPRE US Letter (width 12240, height 15840).\n"
+    "3. Fuente Arial, tamaño 24 (12pt). Títulos en negrita.\n"
+    "4. Campos a completar = placeholders en NEGRITA entre corchetes: `new TextRun({ text: '[NOMBRE]', bold: true })`.\n"
+    "5. NO guardes el archivo tú: el sistema toma la variable `doc` y la guarda automáticamente. "
+    "Solo deja `doc` construida al nivel superior."
+)
+
+# El sistema guarda `doc` (o `document`) en /home/user/out.docx — el modelo no necesita guardar.
+_SAVE_WRAPPER = (
+    "\n;(async () => {\n"
+    "  try {\n"
+    "    const __docx = require('docx');\n"
+    "    let __d = (typeof doc !== 'undefined') ? doc : ((typeof document !== 'undefined') ? document : null);\n"
+    "    if (!__d) { console.log('NO_DOC_VAR'); return; }\n"
+    "    const __b = await __docx.Packer.toBuffer(__d);\n"
+    "    require('fs').writeFileSync('/home/user/out.docx', __b);\n"
+    "    console.log('SAVED_OK');\n"
+    "  } catch (e) { console.log('SAVE_ERR ' + (e && e.message)); }\n"
+    "})();\n"
 )
 
 RENDER_CODE_SCHEMA = {
@@ -53,32 +66,39 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
     """Hilo con event loop propio: AsyncSandbox E2B, ejecuta Node, devuelve bytes."""
     async def _go():
         from e2b_code_interpreter import AsyncSandbox
-        # template 'legal-docx' tiene docx + python-docx pre-instalados (rápido). Fallback: base.
+        # template 'legal-docx' tiene docx global pre-instalado (rápido). Fallback: base + npm install.
         try:
             sbx = await AsyncSandbox.create(api_key=api_key, template="legal-docx")
-        except Exception:  # noqa: BLE001 — si el template no existe aún, usa la base
+        except Exception:  # noqa: BLE001
             sbx = await AsyncSandbox.create(api_key=api_key)
         try:
-            await sbx.files.write("/home/user/gen.js", js_code)
+            await sbx.files.write("/home/user/gen.js", js_code + _SAVE_WRAPPER)
             runner = (
-                "import subprocess\n"
-                # docx pre-instalado en /opt (template legal-docx) → instantáneo; si no, instala local.
-                "subprocess.run('cd /home/user && ([ -d /opt/node_libs/node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
-                "r = subprocess.run('cd /home/user && NODE_PATH=/opt/node_libs/node_modules:./node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
-                "print('__STDERR__'); print((r.stderr or '')[:1200]); print('__END__')\n"
+                "import subprocess, glob, os\n"
+                # docx global ya instalado en el template → instantáneo; si no, instala local.
+                "subprocess.run('cd /home/user && (NP=$(npm root -g 2>/dev/null); ([ -n \"$NP\" ] && [ -d \"$NP/docx\" ]) || npm install docx >/dev/null 2>&1)', shell=True)\n"
+                "r = subprocess.run('cd /home/user && NODE_PATH=$(npm root -g 2>/dev/null):/home/user/node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
+                "f = '/home/user/out.docx' if os.path.exists('/home/user/out.docx') else ''\n"
+                "if not f:\n"
+                "    c = sorted(glob.glob('/home/user/*.docx'), key=os.path.getmtime)\n"
+                "    f = c[-1] if c else ''\n"
+                "print('__FOUND__' + f + '__OUT__' + (r.stdout or '')[:400] + ' || ' + (r.stderr or '')[:500] + '__END__')\n"
             )
             ex = await sbx.run_code(runner)
             stdout = "".join(ex.logs.stdout) if (ex.logs and ex.logs.stdout) else ""
-            try:
-                data = await sbx.files.read("/home/user/out.docx", format="bytes")
-                data = bytes(data) if data else b""
-            except Exception:  # noqa: BLE001
-                data = b""
+            found, diag = "", ""
+            if "__FOUND__" in stdout:
+                seg = stdout.split("__FOUND__", 1)[1].split("__END__", 1)[0]
+                found = seg.split("__OUT__", 1)[0].strip()
+                diag = seg.split("__OUT__", 1)[1] if "__OUT__" in seg else ""
+            data = b""
+            if found:
+                try:
+                    data = bytes(await sbx.files.read(found, format="bytes")) if found else b""
+                except Exception:  # noqa: BLE001
+                    data = b""
             if not data:
-                err = ""
-                if "__STDERR__" in stdout:
-                    err = stdout.split("__STDERR__", 1)[1].split("__END__", 1)[0].strip()
-                return None, f"el script no generó out.docx. Error de Node: {err[:700] or 'desconocido'}"
+                return None, f"el script no generó un .docx. Diagnóstico: {diag[:600] or 'sin salida'}"
             return data, None
         finally:
             try:
