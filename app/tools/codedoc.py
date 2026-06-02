@@ -62,9 +62,9 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
             await sbx.files.write("/home/user/gen.js", js_code)
             runner = (
                 "import subprocess\n"
-                # instala docx solo si no está (en el template ya está → instantáneo)
-                "subprocess.run('cd /home/user && ([ -d node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
-                "r = subprocess.run('cd /home/user && node gen.js', shell=True, capture_output=True, text=True)\n"
+                # docx pre-instalado en /opt (template legal-docx) → instantáneo; si no, instala local.
+                "subprocess.run('cd /home/user && ([ -d /opt/node_libs/node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
+                "r = subprocess.run('cd /home/user && NODE_PATH=/opt/node_libs/node_modules:./node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
                 "print('__STDERR__'); print((r.stderr or '')[:1200]); print('__END__')\n"
             )
             ex = await sbx.run_code(runner)
