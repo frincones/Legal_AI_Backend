@@ -62,22 +62,24 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
     async def _go():
         from e2b_code_interpreter import AsyncSandbox
         # template 'legal-docx' tiene docx global pre-instalado (rápido). Fallback: base + npm install.
+        used = "legal-docx"
         try:
             sbx = await AsyncSandbox.create(api_key=api_key, template="legal-docx")
-        except Exception:  # noqa: BLE001
+        except Exception as _e:  # noqa: BLE001
+            used = f"base (template err: {_e})"
             sbx = await AsyncSandbox.create(api_key=api_key)
         try:
             await sbx.files.write("/home/user/gen.js", js_code)
             runner = (
                 "import subprocess, glob, os\n"
-                # docx global ya instalado en el template → instantáneo; si no, instala local.
+                "opt = os.path.isdir('/opt/node_libs/node_modules/docx')\n"
                 "subprocess.run('cd /home/user && ([ -d /opt/node_libs/node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
                 "r = subprocess.run('cd /home/user && NODE_PATH=/opt/node_libs/node_modules:/home/user/node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
                 "f = '/home/user/out.docx' if os.path.exists('/home/user/out.docx') else ''\n"
                 "if not f:\n"
                 "    c = sorted(glob.glob('/home/user/*.docx') + glob.glob('/tmp/*.docx'), key=os.path.getmtime)\n"
                 "    f = c[-1] if c else ''\n"
-                "print('__FOUND__' + f + '__OUT__' + (r.stdout or '')[:400] + ' || ' + (r.stderr or '')[:500] + '__END__')\n"
+                "print('__FOUND__' + f + '__OUT__[opt_docx=' + str(opt) + '] ' + (r.stdout or '')[:300] + ' || ' + (r.stderr or '')[:500] + '__END__')\n"
             )
             ex = await sbx.run_code(runner)
             stdout = "".join(ex.logs.stdout) if (ex.logs and ex.logs.stdout) else ""
@@ -93,7 +95,7 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
                 except Exception:  # noqa: BLE001
                     data = b""
             if not data:
-                return None, f"el script no generó un .docx. Diagnóstico: {diag[:600] or 'sin salida'}"
+                return None, f"[tmpl={used}] el script no generó un .docx. Diagnóstico: {diag[:600] or 'sin salida'}"
             return data, None
         finally:
             try:
