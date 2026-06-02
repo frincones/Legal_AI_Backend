@@ -6,6 +6,7 @@ DOCX, se suben a Storage, se crean artifacts y se emiten eventos `artifact`.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncGenerator
 
 from .. import bridge, db
@@ -13,11 +14,12 @@ from ..auth import Principal
 from ..config import settings
 from ..tools.registry import TOOL_SCHEMAS, execute as exec_tool
 from . import guardrails
-from .llm import client, tier_to_model
+from .llm import client, is_transient, tier_to_model
 from .router import route
 from .system_prompts import WORKER_SYSTEM
 
 MAX_ITERS = 5
+MAX_STREAM_RETRIES = 4  # reintentos ante errores transitorios (503/429/timeout)
 
 SKILL_FRAMING = (
     "[CONTEXTO DE EJECUCIÓN — APP WEB MULTI-TENANT]\n"
@@ -198,21 +200,38 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     try:
         for _ in range(MAX_ITERS):
             turn_text = ""
+            emitted = False
+            final = None
             kwargs = dict(model=model, max_tokens=4096, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo)
             if settings.thinking_budget and tier in ("sonnet", "opus"):
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": settings.thinking_budget}
-            async with client().messages.stream(**kwargs) as stream:
-                async for ev in stream:
-                    if getattr(ev, "type", None) != "content_block_delta":
-                        continue
-                    d = ev.delta
-                    dt = getattr(d, "type", None)
-                    if dt == "text_delta":
-                        turn_text += d.text
-                        yield bridge.sse(bridge.TEXT_DELTA, {"text": d.text, "message_id": session_id})
-                    elif dt == "thinking_delta":
-                        yield bridge.sse(bridge.THINKING, {"text": d.thinking, "message_id": session_id})
-                final = await stream.get_final_message()
+            for attempt in range(MAX_STREAM_RETRIES):
+                try:
+                    turn_text = ""
+                    async with client().messages.stream(**kwargs) as stream:
+                        async for ev in stream:
+                            if getattr(ev, "type", None) != "content_block_delta":
+                                continue
+                            d = ev.delta
+                            dt = getattr(d, "type", None)
+                            if dt == "text_delta":
+                                turn_text += d.text
+                                emitted = True
+                                yield bridge.sse(bridge.TEXT_DELTA, {"text": d.text, "message_id": session_id})
+                            elif dt == "thinking_delta":
+                                emitted = True
+                                yield bridge.sse(bridge.THINKING, {"text": d.thinking, "message_id": session_id})
+                        final = await stream.get_final_message()
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    # Reintenta solo si es transitorio Y aún no se emitió contenido en este turno.
+                    if emitted or not is_transient(exc) or attempt == MAX_STREAM_RETRIES - 1:
+                        raise
+                    yield bridge.sse(bridge.AGENT_STEP,
+                                     {"task_id": session_id, "agent": "worker", "status": "retry", "attempt": attempt + 1})
+                    await asyncio.sleep(min(2 ** attempt, 8))
+            if final is None:
+                break
             full += turn_text
             u = final.usage
             usage["input"] += u.input_tokens
@@ -253,7 +272,9 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                         pass
             convo.append({"role": "user", "content": results})
     except Exception as exc:  # noqa: BLE001
-        yield bridge.sse(bridge.ERROR, {"message": str(exc), "subtype": "anthropic"})
+        msg = ("El servicio de IA está temporalmente saturado. Intenta de nuevo en unos segundos."
+               if is_transient(exc) else str(exc))
+        yield bridge.sse(bridge.ERROR, {"message": msg, "subtype": "anthropic"})
 
     # ── Guardrails (post): citation linter ──
     if org_id and full:
