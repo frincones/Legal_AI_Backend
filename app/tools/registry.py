@@ -1,0 +1,106 @@
+"""Registro de tools del agente (Sprint 1.3): document tools T5.
+
+Schemas para la API de Anthropic + dispatcher que ejecuta, sube a Storage,
+crea artifacts/artifact_versions y devuelve un resumen para el modelo.
+"""
+from __future__ import annotations
+
+import uuid
+
+from .. import db
+from . import documents, storage
+
+# ── Schemas (tool-use de Anthropic) ──
+TOOL_SCHEMAS = [
+    {
+        "name": "render_memo",
+        "description": "Genera un MEMO legal profesional en DOCX (con header de work-product). Úsalo cuando el usuario pida un memo, análisis escrito o dictamen entregable.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "sections": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {
+                        "heading": {"type": "string"}, "body": {"type": "string"}},
+                        "required": ["body"]},
+                },
+            },
+            "required": ["title", "sections"],
+        },
+    },
+    {
+        "name": "render_letter",
+        "description": "Genera una CARTA formal en DOCX (demanda, C&D, respuesta, carta al cliente). Úsalo cuando el usuario pida una carta entregable.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "asunto/título interno"},
+                "recipient": {"type": "string"},
+                "body": {"type": "string"},
+                "sender": {"type": "string"},
+                "date": {"type": "string"},
+            },
+            "required": ["title", "recipient", "body"],
+        },
+    },
+    {
+        "name": "build_table_doc",
+        "description": "Genera una TABLA/schedule/grid en DOCX (claim chart, disclosure schedule, diligence grid). Úsalo cuando el entregable sea tabular.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "columns": {"type": "array", "items": {"type": "string"}},
+                "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+            },
+            "required": ["title", "columns", "rows"],
+        },
+    },
+]
+
+KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "table"}
+
+
+async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
+    """Devuelve (summary_para_el_modelo, artifact_dict_para_el_bridge)."""
+    gen = documents.GENERATORS.get(name)
+    if not gen:
+        return (f"tool desconocida: {name}", None)
+    try:
+        data, md = gen(**args)
+    except Exception as exc:  # noqa: BLE001
+        return (f"error generando documento: {exc}", None)
+
+    org_id = ctx["org_id"]
+    title = args.get("title", "documento")
+    artifact_id = str(uuid.uuid4())
+    path = f"org/{org_id}/artifacts/{artifact_id}/v1.docx"
+
+    try:
+        await storage.ensure_bucket()
+        await storage.upload(path, data)
+        url = await storage.signed_url(path)
+    except Exception as exc:  # noqa: BLE001
+        return (f"documento generado pero falló el guardado: {exc}", None)
+
+    version_id = None
+    try:
+        art = await db.insert("artifacts", {
+            "id": artifact_id, "org_id": org_id, "session_id": ctx.get("session_id"),
+            "matter_id": ctx.get("matter_id"), "title": title, "kind": KINDS.get(name, "document"),
+            "created_by": ctx.get("user_id"),
+        }, returning=True)
+        ver = await db.insert("artifact_versions", {
+            "org_id": org_id, "artifact_id": artifact_id, "version": 1,
+            "content": md, "storage_path": path, "authored_by": "agent",
+        }, returning=True)
+        version_id = ver[0]["id"] if ver else None
+        await db.patch("artifacts", f"id=eq.{artifact_id}", {"current_version_id": version_id})
+    except Exception:  # noqa: BLE001
+        pass
+
+    artifact = {"id": artifact_id, "kind": KINDS.get(name, "document"),
+                "title": title, "version": 1, "uri": url, "version_id": version_id}
+    summary = f"Documento '{title}' generado y guardado (artifact {artifact_id}, v1). Disponible para descarga."
+    return (summary, artifact)
