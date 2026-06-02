@@ -261,7 +261,7 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                 yield bridge.sse(bridge.TOOL_CALL, {"id": tu.id, "name": tu.name, "input": tu.input})
                 # Tope: si render_document_code (E2B, lento) ya falló una vez este turno, no lo reintentes
                 # más; fuerza el fallback rápido a plantilla. Evita 4× instalaciones lentas → reset SSE.
-                if tu.name == "render_document_code" and doc_code_fails >= 1:
+                if tu.name == "render_document_code" and doc_code_fails >= 2:
                     summary, artifact = (
                         "render_document_code no disponible tras un fallo previo. Genera el documento "
                         "AHORA con render_letter o render_memo (plantilla rápida).", None)

@@ -19,15 +19,16 @@ _DOCX_GUIDE = (
     "1. `const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, AlignmentType, "
     "HeadingLevel, BorderStyle, PageNumber, Footer, Header, LevelFormat, WidthType, TabStopType, "
     "TabStopPosition } = require('docx');`\n"
-    "2. Construye, AL NIVEL SUPERIOR (no dentro de funciones), una variable llamada exactamente `doc`: "
+    "2. Construye, SIEMPRE AL NIVEL SUPERIOR DEL MÓDULO (NUNCA dentro de una función ni de un async main), "
+    "una variable llamada EXACTAMENTE `doc` con `const doc = new Document({...})`:\n"
     "`const doc = new Document({ sections: [{ properties: { page: { size: { width: 12240, height: 15840 }, "
     "margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 } } }, children: [...] }] });`\n"
     "   CRÍTICO: docx-js usa A4 por defecto — fija SIEMPRE US Letter (width 12240, height 15840).\n"
     "3. Fuente Arial, tamaño 24 (12pt). Títulos en negrita.\n"
     "4. Campos a completar = placeholders en NEGRITA entre corchetes: `new TextRun({ text: '[NOMBRE]', bold: true })`.\n"
-    "5. TERMINA SIEMPRE el código (al nivel superior, NO dentro de funciones) con EXACTAMENTE:\n"
-    "   `Packer.toBuffer(doc).then(b => require('fs').writeFileSync('/home/user/out.docx', b)).catch(e => console.error('SAVE_ERR', e && e.message));`\n"
-    "   Guarda en esa ruta EXACTA. No uses rutas relativas ni otros nombres.\n"
+    "5. NO serialices ni guardes el documento tú mismo: NO llames a `Packer`, NO escribas archivos, NO uses "
+    "`Packer.toBuffer` ni `writeFileSync`. El sistema serializa automáticamente la variable `doc`. Tu código "
+    "debe simplemente declarar `const doc = ...` al nivel superior y terminar ahí.\n"
     "API — errores comunes a EVITAR:\n"
     "- `PageNumber` NO es constructor. Número de página: `new TextRun({ children: [PageNumber.CURRENT] })` "
     "y total: `[PageNumber.TOTAL_PAGES]`.\n"
@@ -69,17 +70,33 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
             used = f"base (template err: {_e})"
             sbx = await AsyncSandbox.create(api_key=api_key)
         try:
-            await sbx.files.write("/home/user/gen.js", js_code)
+            # El sistema serializa `doc` (no el modelo): anexamos un serializador robusto al final del
+            # gen.js. Al estar en el MISMO archivo/scope ve el `const doc` top-level; re-requiere Packer/fs
+            # por su cuenta y SIEMPRE registra SAVED_OK o WRAP_ERR con stack → diagnóstico siempre informativo.
+            serializer = (
+                "\n;(async () => {\n"
+                "  try {\n"
+                "    const { Packer } = require('docx');\n"
+                "    const fs = require('fs');\n"
+                "    if (typeof doc === 'undefined') { console.error('WRAP_ERR: no existe la variable top-level `doc`'); return; }\n"
+                "    const b = await Packer.toBuffer(doc);\n"
+                "    fs.writeFileSync('/home/user/out.docx', b);\n"
+                "    console.log('SAVED_OK', b.length);\n"
+                "  } catch (e) { console.error('WRAP_ERR:', (e && e.stack) || String(e)); }\n"
+                "})();\n"
+            )
+            await sbx.files.write("/home/user/gen.js", (js_code or "") + serializer)
             runner = (
                 "import subprocess, glob, os\n"
                 "opt = os.path.isdir('/opt/node_libs/node_modules/docx')\n"
+                "sz = os.path.getsize('/home/user/gen.js') if os.path.exists('/home/user/gen.js') else -1\n"
                 "subprocess.run('cd /home/user && ([ -d /opt/node_libs/node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
                 "r = subprocess.run('cd /home/user && NODE_PATH=/opt/node_libs/node_modules:/home/user/node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
                 "f = '/home/user/out.docx' if os.path.exists('/home/user/out.docx') else ''\n"
                 "if not f:\n"
                 "    c = sorted(glob.glob('/home/user/*.docx') + glob.glob('/tmp/*.docx'), key=os.path.getmtime)\n"
                 "    f = c[-1] if c else ''\n"
-                "print('__FOUND__' + f + '__OUT__[opt_docx=' + str(opt) + '] ' + (r.stdout or '')[:300] + ' || ' + (r.stderr or '')[:500] + '__END__')\n"
+                "print('__FOUND__' + f + '__OUT__[opt=' + str(opt) + ' rc=' + str(r.returncode) + ' js=' + str(sz) + '] ' + (r.stdout or '')[:200] + ' || ' + (r.stderr or '')[:600] + '__END__')\n"
             )
             ex = await sbx.run_code(runner)
             stdout = "".join(ex.logs.stdout) if (ex.logs and ex.logs.stdout) else ""
