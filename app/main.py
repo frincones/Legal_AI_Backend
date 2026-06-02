@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import chat, health
+from .api import chat, documents, health
 from .config import settings
 
 app = FastAPI(title="Legal AI Backend", version="0.0.1")
@@ -19,6 +19,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(chat.router)
+app.include_router(documents.router)
 
 
 @app.get("/")

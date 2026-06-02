@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 
 from .. import db
-from . import documents, storage
+from . import documents, rag, storage
 
 # ── Schemas (tool-use de Anthropic) ──
 TOOL_SCHEMAS = [
@@ -59,11 +59,17 @@ TOOL_SCHEMAS = [
     },
 ]
 
+TOOL_SCHEMAS.append(rag.SEARCH_SCHEMA)
+
 KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "table"}
 
 
 async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
     """Devuelve (summary_para_el_modelo, artifact_dict_para_el_bridge)."""
+    if name == "search_documents":
+        text = await rag.search(args.get("query", ""), ctx["org_id"], ctx.get("matter_id"))
+        return (text, None)
+
     gen = documents.GENERATORS.get(name)
     if not gen:
         return (f"tool desconocida: {name}", None)

@@ -12,6 +12,7 @@ from .. import bridge, db
 from ..auth import Principal
 from ..config import settings
 from ..tools.registry import TOOL_SCHEMAS, execute as exec_tool
+from . import guardrails
 from .llm import client, tier_to_model
 from .router import route
 from .system_prompts import WORKER_SYSTEM
@@ -41,6 +42,22 @@ async def _skill_body(skill_key: str) -> str | None:
     return rows[0].get("body_md") if rows else None
 
 
+async def _attachment_context(doc_ids: list[str], org_id: str) -> str | None:
+    snippets = []
+    for did in (doc_ids or [])[:5]:
+        rows = await db.select(
+            "chunks", f"org_id=eq.{org_id}&document_id=eq.{did}&select=content,idx&order=idx.asc&limit=12")
+        if not rows:
+            continue
+        title_rows = await db.select("documents", f"id=eq.{did}&select=title&limit=1")
+        title = title_rows[0]["title"] if title_rows else did
+        body = "\n".join(r["content"] for r in rows)[:8000]
+        snippets.append(f"# Adjunto: {title}\n{body}")
+    if not snippets:
+        return None
+    return guardrails.wrap_untrusted("\n\n".join(snippets), source="adjuntos")
+
+
 async def _load_history(session_id: str) -> list[dict]:
     rows = await db.select(
         "messages", f"select=role,seq,message_parts(idx,type,text)&session_id=eq.{session_id}&order=seq.asc")
@@ -66,7 +83,8 @@ def _assistant_content(blocks) -> list[dict]:
     return out
 
 
-async def run_chat(session_id: str, principal: Principal, message: str) -> AsyncGenerator[str, None]:
+async def run_chat(session_id: str, principal: Principal, message: str,
+                   document_ids: list[str] | None = None) -> AsyncGenerator[str, None]:
     org_id = principal.org_id or await db.resolve_org(principal.user_id)
     persist = bool(org_id and settings.supabase_service_role_key)
 
@@ -112,11 +130,22 @@ async def run_chat(session_id: str, principal: Principal, message: str) -> Async
     if skill_key and (body := await _skill_body(skill_key)):
         system_blocks.append({"type": "text", "text": SKILL_FRAMING + body, "cache_control": {"type": "ephemeral"}})
 
+    # ── Guardrails (pre) ──
+    if org_id:
+        notice = await guardrails.pre_checks(principal, org_id, skill_key, session_id=session_id, run_id=run_id)
+        if notice:
+            system_blocks.append({"type": "text", "text": "[GUARDRAIL] " + notice})
+
     yield bridge.sse(bridge.AGENT_STEP,
                      {"task_id": session_id, "agent": skill_key or "worker", "tier": tier, "status": "started"})
 
     ctx = {"org_id": org_id, "session_id": session_id, "matter_id": None, "user_id": principal.user_id}
     convo = list(history)
+    # ── Adjuntos (Sprint 1.4): inyecta contenido del adjunto como DATA no confiable ──
+    if document_ids and org_id and convo and convo[-1]["role"] == "user":
+        actx = await _attachment_context(document_ids, org_id)
+        if actx:
+            convo[-1] = {"role": "user", "content": f"{convo[-1]['content']}\n\n{actx}"}
     full = ""
     artifacts: list[dict] = []
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
@@ -162,6 +191,13 @@ async def run_chat(session_id: str, principal: Principal, message: str) -> Async
             convo.append({"role": "user", "content": results})
     except Exception as exc:  # noqa: BLE001
         yield bridge.sse(bridge.ERROR, {"message": str(exc), "subtype": "anthropic"})
+
+    # ── Guardrails (post): citation linter ──
+    if org_id and full:
+        note = await guardrails.lint_citations(full, org_id, session_id=session_id, run_id=run_id)
+        if note:
+            yield bridge.sse(bridge.TEXT_DELTA, {"text": note, "message_id": session_id})
+            full += note
 
     if persist and assistant_msg_id:
         try:

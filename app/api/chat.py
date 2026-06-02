@@ -17,6 +17,7 @@ router = APIRouter()
 
 class ChatRequest(BaseModel):
     message: str
+    document_ids: list[str] | None = None
 
 
 @router.post("/api/chat/{session_id}")
@@ -26,7 +27,7 @@ async def chat(
     principal: Principal = Depends(get_principal),
 ) -> StreamingResponse:
     return StreamingResponse(
-        run_chat(session_id, principal, body.message),
+        run_chat(session_id, principal, body.message, body.document_ids),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
