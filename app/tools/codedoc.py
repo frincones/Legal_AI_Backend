@@ -18,10 +18,11 @@ RENDER_CODE_SCHEMA = {
     "name": "render_document_code",
     "description": (
         "Genera un DOCX con FORMATO AVANZADO escribiendo código Python con la librería "
-        "python-docx. Tu código DEBE construir el documento y guardarlo EXACTAMENTE en "
-        "/tmp/out.docx. Úsalo para documentos formales largos (poderes, contratos, demandas, "
-        "minutas) donde importan la numeración, los estilos y la maquetación. Para entregables "
-        "simples usa render_letter/render_memo."
+        "python-docx. Tu código debe construir el documento en una variable llamada `doc` "
+        "(`from docx import Document; doc = Document(); ...`). NO necesitas guardarlo: el sistema "
+        "lo guarda automáticamente. Úsalo para documentos formales (poderes, contratos, demandas, "
+        "minutas) donde importan numeración, estilos y maquetación. Para entregables simples usa "
+        "render_letter/render_memo."
     ),
     "input_schema": {
         "type": "object",
@@ -38,6 +39,13 @@ _PREP = (
     "try:\n    import docx  # noqa\n"
     "except Exception:\n    subprocess.run([sys.executable,'-m','pip','install','-q','python-docx'])\n"
 )
+# Red de seguridad: guarda el documento del modelo en la ruta exacta, sin depender de que lo haga él.
+_POST = (
+    "\ntry:\n    doc.save('/tmp/out.docx')\n"
+    "except NameError:\n"
+    "    try:\n        document.save('/tmp/out.docx')\n    except Exception:\n        pass\n"
+    "except Exception:\n    pass\n"
+)
 
 
 def _build_blocking(code: str, api_key: str) -> tuple[bytes | None, str | None]:
@@ -46,7 +54,7 @@ def _build_blocking(code: str, api_key: str) -> tuple[bytes | None, str | None]:
         from e2b_code_interpreter import AsyncSandbox
         sbx = await AsyncSandbox.create(api_key=api_key)
         try:
-            ex = await sbx.run_code(_PREP + (code or ""))
+            ex = await sbx.run_code(_PREP + (code or "") + _POST)
             if getattr(ex, "error", None):
                 return None, f"{ex.error.name}: {ex.error.value}"
             data = await sbx.files.read("/tmp/out.docx", format="bytes")
