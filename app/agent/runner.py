@@ -111,13 +111,13 @@ def _wants_document(text: str) -> bool:
     return any(v in t for v in _DOC_VERBS) and any(n in t for n in _DOC_NOUNS)
 
 
-def _assistant_content(blocks) -> list[dict]:
+def _assistant_content(blocks, include_thinking: bool = True) -> list[dict]:
     out = []
     for b in blocks:
         t = getattr(b, "type", None)
-        if t == "thinking":
+        if t == "thinking" and include_thinking:
             out.append({"type": "thinking", "thinking": b.thinking, "signature": b.signature})
-        elif t == "redacted_thinking":
+        elif t == "redacted_thinking" and include_thinking:
             out.append({"type": "redacted_thinking", "data": b.data})
         elif t == "text":
             out.append({"type": "text", "text": b.text})
@@ -240,12 +240,12 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             usage["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
 
             tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
-            if final.stop_reason != "tool_use" or not tool_uses:
-                # Anti "announce-and-stop" / texto-en-vez-de-tool: el usuario pidió un entregable
-                # (o el modelo dijo que lo generaría) pero no se creó artifact → un empujón a la tool.
+            if not tool_uses:
+                # Sin tool calls este turno → nudge una vez (texto sin thinking) o terminar.
                 if not artifacts and not nudged and (wants_doc or _intends_document(turn_text)):
                     nudged = True
-                    convo.append({"role": "assistant", "content": _assistant_content(final.content)})
+                    ac = _assistant_content(final.content, include_thinking=False) or [{"type": "text", "text": turn_text or "."}]
+                    convo.append({"role": "assistant", "content": ac})
                     convo.append({"role": "user", "content":
                         "Procede AHORA: genera el documento llamando la herramienta "
                         "(render_document_code / render_letter / render_memo). Si faltan datos, usa "
@@ -253,6 +253,7 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                     continue
                 break
 
+            # Hay tool_use(s) → ejecutar SIEMPRE y devolver tool_results (sin depender de stop_reason).
             convo.append({"role": "assistant", "content": _assistant_content(final.content)})
             results = []
             for tu in tool_uses:
