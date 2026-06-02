@@ -194,6 +194,7 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     full = ""
     artifacts: list[dict] = []
     nudged = False
+    doc_code_fails = 0  # tope de reintentos lentos de E2B → fallback rápido a plantilla
     wants_doc = _wants_document(message)
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
@@ -258,14 +259,23 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             results = []
             for tu in tool_uses:
                 yield bridge.sse(bridge.TOOL_CALL, {"id": tu.id, "name": tu.name, "input": tu.input})
-                # Heartbeats mientras la tool corre (E2B/npm puede tardar) → la conexión SSE no se resetea.
-                task = asyncio.create_task(exec_tool(tu.name, tu.input, ctx))
-                while True:
-                    done, _ = await asyncio.wait({task}, timeout=10)
-                    if done:
-                        break
-                    yield bridge.heartbeat()
-                summary, artifact = task.result()
+                # Tope: si render_document_code (E2B, lento) ya falló una vez este turno, no lo reintentes
+                # más; fuerza el fallback rápido a plantilla. Evita 4× instalaciones lentas → reset SSE.
+                if tu.name == "render_document_code" and doc_code_fails >= 1:
+                    summary, artifact = (
+                        "render_document_code no disponible tras un fallo previo. Genera el documento "
+                        "AHORA con render_letter o render_memo (plantilla rápida).", None)
+                else:
+                    # Heartbeats mientras la tool corre → la conexión SSE no se resetea.
+                    task = asyncio.create_task(exec_tool(tu.name, tu.input, ctx))
+                    while True:
+                        done, _ = await asyncio.wait({task}, timeout=10)
+                        if done:
+                            break
+                        yield bridge.heartbeat()
+                    summary, artifact = task.result()
+                    if tu.name == "render_document_code" and artifact is None:
+                        doc_code_fails += 1
                 if artifact:
                     artifacts.append(artifact)
                     yield bridge.sse(bridge.ARTIFACT, artifact)

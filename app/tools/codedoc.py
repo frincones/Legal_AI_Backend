@@ -53,12 +53,17 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
     """Hilo con event loop propio: AsyncSandbox E2B, ejecuta Node, devuelve bytes."""
     async def _go():
         from e2b_code_interpreter import AsyncSandbox
-        sbx = await AsyncSandbox.create(api_key=api_key)
+        # template 'legal-docx' tiene docx + python-docx pre-instalados (rápido). Fallback: base.
+        try:
+            sbx = await AsyncSandbox.create(api_key=api_key, template="legal-docx")
+        except Exception:  # noqa: BLE001 — si el template no existe aún, usa la base
+            sbx = await AsyncSandbox.create(api_key=api_key)
         try:
             await sbx.files.write("/home/user/gen.js", js_code)
             runner = (
-                "import subprocess, os\n"
-                "subprocess.run('cd /home/user && (npm ls docx >/dev/null 2>&1 || npm install docx >/dev/null 2>&1)', shell=True)\n"
+                "import subprocess\n"
+                # instala docx solo si no está (en el template ya está → instantáneo)
+                "subprocess.run('cd /home/user && ([ -d node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
                 "r = subprocess.run('cd /home/user && node gen.js', shell=True, capture_output=True, text=True)\n"
                 "print('__STDERR__'); print((r.stderr or '')[:1200]); print('__END__')\n"
             )
