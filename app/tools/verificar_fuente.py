@@ -236,8 +236,11 @@ def _prefiltro(md: str, hints: list[str], max_chars: int = 4500) -> str:
         idx.update(range(max(0, i - 2), min(len(lines), i + 3)))
     keep = [lines[i] for i in sorted(idx)]
     out = "\n".join(keep) if keep else md
-    # siempre incluir el encabezado (título/identificación)
-    return (md[:800] + "\n…\n" + out)[:max_chars]
+    # encabezado (identificación) + secciones relevantes + COLA (la parte resolutiva/RESUELVE
+    # de las sentencias va al final del documento) → reservamos espacio para ella.
+    tail = md[-1800:]
+    head_body = (md[:800] + "\n…\n" + out)[: max(0, max_chars - 1850)]
+    return head_body + "\n…[parte final]…\n" + tail
 
 
 # ─────────────────────────── Localizador de URLs ───────────────────────────
@@ -297,15 +300,16 @@ async def _urls_sentencia(d: dict) -> list[tuple[str, dict]]:
 _RE_LINK = re.compile(r"\[[^\]]+\]\((https?://[^\)\s]+)\)")
 
 
-async def _fetch_con_saltos(url: str, dominios: list[str], org_id: str | None, saltos: int) -> str:
-    md = await web.fetch_raw(url, org_id)
+async def _fetch_con_saltos(url: str, dominios: list[str], org_id: str | None, saltos: int,
+                            max_chars: int = 12000) -> str:
+    md = await web.fetch_raw(url, org_id, max_chars=max_chars)
     if md and len(md) > 600:
         return md
     # salto: si la página es índice/buscador, sigue el primer enlace al mismo dominio
     if saltos > 0 and md:
         for link in _RE_LINK.findall(md):
             if any(dom in link for dom in (dominios or [])) and link != url:
-                deeper = await _fetch_con_saltos(link, dominios, org_id, saltos - 1)
+                deeper = await _fetch_con_saltos(link, dominios, org_id, saltos - 1, max_chars)
                 if deeper and len(deeper) > 600:
                     return deeper
     return md
@@ -403,16 +407,17 @@ async def _verificar_sentencia(d: dict, org_id: str | None) -> dict:
     if not cands:
         return _record_vacio(d, nombre, "jurisprudencia")
     fetched = await asyncio.gather(*[
-        _fetch_con_saltos(u, a["dominios"], org_id, settings.vf_max_saltos) for u, a in cands])
+        _fetch_con_saltos(u, a["dominios"], org_id, settings.vf_max_saltos, max_chars=30000) for u, a in cands])
     for (u, a), md in zip(cands, fetched):
         if not md or len(md) < 400:
             continue
-        pf = _prefiltro(md, a.get("hints_extraccion"), max_chars=5500)
+        pf = _prefiltro(md, a.get("hints_extraccion"), max_chars=7000)
         ext = await _haiku_tool(
-            f"Texto oficial de la {nombre} ({a['entidad']}). Extrae sus datos clave. "
-            f"Cita TEXTUAL la parte resolutiva (RESUELVE). Si declara una norma EXEQUIBLE CONDICIONADO, "
-            f"indícalo en efecto y describe el condicionamiento en resultado_vigencia.\n\n"
-            f"<texto>\n{pf}\n</texto>", _JURIS_TOOL)
+            f"Texto oficial de la {nombre} ({a['entidad']}). Extrae sus datos clave. El campo 'efecto' "
+            f"DEBE salir de la parte resolutiva: busca 'RESUELVE' / 'Declarar EXEQUIBLE' / 'INEXEQUIBLE' / "
+            f"'EXEQUIBLE, en el entendido' (= exequible_condicionado). Cita TEXTUAL esa parte resolutiva "
+            f"en resuelve_textual. Si es condicionado, describe el condicionamiento en norma_afectada.resultado_vigencia.\n\n"
+            f"<texto>\n{pf}\n</texto>", _JURIS_TOOL, max_tokens=2000)
         if ext.get("efecto") and ext["efecto"] != "no_encontrada":
             rec = {
                 "consulta": nombre, "tipo_fuente": "jurisprudencia", "clase": d["clase"],
