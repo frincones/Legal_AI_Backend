@@ -203,7 +203,9 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             turn_text = ""
             emitted = False
             final = None
-            kwargs = dict(model=model, max_tokens=4096, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo)
+            # 16384: el código docx-js de documentos largos (contratos, demandas) puede ser extenso;
+            # con max_tokens=4096 se truncaba el input.code de render_document_code → quedaba vacío.
+            kwargs = dict(model=model, max_tokens=16384, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo)
             if settings.thinking_budget and tier in ("sonnet", "opus"):
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": settings.thinking_budget}
             for attempt in range(MAX_STREAM_RETRIES):
