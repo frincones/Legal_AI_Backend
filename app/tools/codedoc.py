@@ -39,12 +39,18 @@ _PREP = (
     "try:\n    import docx  # noqa\n"
     "except Exception:\n    subprocess.run([sys.executable,'-m','pip','install','-q','python-docx'])\n"
 )
-# Red de seguridad: guarda el documento del modelo en la ruta exacta, sin depender de que lo haga él.
+# Red de seguridad: escanea TODAS las variables y guarda cualquier Document de python-docx
+# en la ruta exacta — sin depender del nombre de la variable ni de que el modelo lo guarde.
 _POST = (
-    "\ntry:\n    doc.save('/tmp/out.docx')\n"
-    "except NameError:\n"
-    "    try:\n        document.save('/tmp/out.docx')\n    except Exception:\n        pass\n"
-    "except Exception:\n    pass\n"
+    "\ntry:\n"
+    "    import docx.document as _dxd\n"
+    "    _saved = False\n"
+    "    for _v in list(globals().values()):\n"
+    "        if isinstance(_v, _dxd.Document):\n"
+    "            _v.save('/tmp/out.docx'); _saved = True; break\n"
+    "    print('AUTOSAVE_OK' if _saved else 'AUTOSAVE_NODOC')\n"
+    "except Exception as _e:\n"
+    "    print('AUTOSAVE_ERR', _e)\n"
 )
 
 
