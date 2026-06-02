@@ -2,6 +2,7 @@
 
 > Estado: **diseño aprobado, sin implementar**. Documento vivo.
 > Autor: equipo Legal AI · Última actualización: 2026-06-02
+> **Plan de ejecución detallado (F0-F4):** ver [`PLAN_verificar_fuente.md`](./PLAN_verificar_fuente.md)
 
 ## 1. Objetivo
 
