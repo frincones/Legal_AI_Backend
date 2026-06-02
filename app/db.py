@@ -56,6 +56,13 @@ async def select(table: str, query: str) -> list:
         return r.json()
 
 
+async def rpc(fn: str, params: dict) -> list:
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.post(f"{_rest()}/rpc/{fn}", headers=_headers(), json=params)
+        r.raise_for_status()
+        return r.json() if r.content else []
+
+
 async def resolve_org(user_id: str | None) -> str | None:
     """org_id de la primera membresía activa del usuario."""
     if not user_id:

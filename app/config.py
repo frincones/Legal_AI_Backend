@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     firecrawl_api_base: str = "https://api.firecrawl.dev"
     context7_api_key: str = ""
 
+    # Embeddings (modelo local fastembed)
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+
     # CORS — orígenes del frontend (coma-separados)
     cors_origins: str = "*"
 

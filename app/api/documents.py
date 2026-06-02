@@ -4,6 +4,7 @@ Sprint 1.4 (ruta directa) + base para 2.3 (FTS sobre chunks).
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
@@ -11,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from .. import db
 from ..auth import Principal, get_principal
 from ..ingest.extract import chunk, extract_text
-from ..tools import storage
+from ..tools import embeddings, storage
 
 router = APIRouter()
 
@@ -44,10 +45,19 @@ async def upload_document(
         "title": file.filename, "mime_type": file.content_type, "storage_path": path,
         "is_untrusted": True, "ingest_status": "complete",
     })
+    embedded = 0
     if chunks:
-        await db.insert("chunks", [
-            {"org_id": org_id, "document_id": doc_id, "matter_id": matter_id,
-             "idx": i, "content": c, "token_count": len(c) // 4}
-            for i, c in enumerate(chunks)
-        ])
-    return {"document_id": doc_id, "title": file.filename, "chars": len(text), "chunks": len(chunks)}
+        rows = [{"org_id": org_id, "document_id": doc_id, "matter_id": matter_id,
+                 "idx": i, "content": c, "token_count": len(c) // 4}
+                for i, c in enumerate(chunks)]
+        if embeddings.available():
+            try:
+                vecs = await asyncio.to_thread(embeddings.embed, chunks)
+                for row, v in zip(rows, vecs):
+                    row["embedding"] = embeddings.to_pgvector(v)
+                embedded = len(vecs)
+            except Exception:  # noqa: BLE001
+                pass
+        await db.insert("chunks", rows)
+    return {"document_id": doc_id, "title": file.filename, "chars": len(text),
+            "chunks": len(chunks), "embedded": embedded}
