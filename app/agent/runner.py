@@ -72,6 +72,16 @@ async def _load_history(session_id: str) -> list[dict]:
     return msgs
 
 
+_DOC_INTENT = ("genero el documento", "generar el documento", "generaré", "procedo a generar",
+               "ahora genero", "documento profesional", "voy a generar", "redacto el documento",
+               "elaboro el documento", "procedo a redactar", "genero el poder", "genero la carta")
+
+
+def _intends_document(text: str) -> bool:
+    t = (text or "").lower()
+    return any(p in t for p in _DOC_INTENT)
+
+
 def _assistant_content(blocks) -> list[dict]:
     out = []
     for b in blocks:
@@ -148,13 +158,14 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             convo[-1] = {"role": "user", "content": f"{convo[-1]['content']}\n\n{actx}"}
     full = ""
     artifacts: list[dict] = []
+    nudged = False
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
     try:
         for _ in range(MAX_ITERS):
             turn_text = ""
             async with client().messages.stream(
-                model=model, max_tokens=3072, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo,
+                model=model, max_tokens=4096, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo,
             ) as stream:
                 async for text in stream.text_stream:
                     turn_text += text
@@ -169,6 +180,15 @@ async def run_chat(session_id: str, principal: Principal, message: str,
 
             tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
             if final.stop_reason != "tool_use" or not tool_uses:
+                # Anti "announce-and-stop": anunció generar documento pero no llamó la tool → un empujón.
+                if not artifacts and not nudged and _intends_document(turn_text):
+                    nudged = True
+                    convo.append({"role": "assistant", "content": _assistant_content(final.content)})
+                    convo.append({"role": "user", "content":
+                        "Procede AHORA: llama la herramienta de documento "
+                        "(render_letter / render_memo / build_table_doc) y genera el entregable con el "
+                        "contenido que ya preparaste. No respondas solo con texto."})
+                    continue
                 break
 
             convo.append({"role": "assistant", "content": _assistant_content(final.content)})
