@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 
 from .. import db
-from . import documents, rag, storage
+from . import code, documents, rag, storage, web
 
 # ── Schemas (tool-use de Anthropic) ──
 TOOL_SCHEMAS = [
@@ -59,7 +59,9 @@ TOOL_SCHEMAS = [
     },
 ]
 
-TOOL_SCHEMAS.append(rag.SEARCH_SCHEMA)
+TOOL_SCHEMAS.extend([rag.SEARCH_SCHEMA, web.WEB_SEARCH_SCHEMA, web.WEB_FETCH_SCHEMA, code.RUN_CODE_SCHEMA])
+# Sprint 2.5 · prompt caching: cachea TODAS las defs de tools (prefijo estable) marcando la última.
+TOOL_SCHEMAS[-1]["cache_control"] = {"type": "ephemeral"}
 
 KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "table"}
 
@@ -67,8 +69,13 @@ KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "t
 async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
     """Devuelve (summary_para_el_modelo, artifact_dict_para_el_bridge)."""
     if name == "search_documents":
-        text = await rag.search(args.get("query", ""), ctx["org_id"], ctx.get("matter_id"))
-        return (text, None)
+        return (await rag.search(args.get("query", ""), ctx["org_id"], ctx.get("matter_id")), None)
+    if name == "web_search":
+        return (await web.web_search(args.get("query", "")), None)
+    if name == "web_fetch":
+        return (await web.web_fetch(args.get("url", ""), ctx.get("org_id")), None)
+    if name == "run_code":
+        return (await code.run_code(args.get("code", "")), None)
 
     gen = documents.GENERATORS.get(name)
     if not gen:

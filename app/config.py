@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     # Tools (Fase 2)
     e2b_api_key: str = ""
     brave_search_api_key: str = ""
+    brave_search_endpoint: str = "https://api.search.brave.com/res/v1/web/search"
     firecrawl_api_key: str = ""
     firecrawl_api_base: str = "https://api.firecrawl.dev"
     context7_api_key: str = ""
