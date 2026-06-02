@@ -27,7 +27,15 @@ _DOCX_GUIDE = (
     "4. Campos a completar = placeholders en NEGRITA entre corchetes: `new TextRun({ text: '[NOMBRE]', bold: true })`.\n"
     "5. TERMINA SIEMPRE el código (al nivel superior, NO dentro de funciones) con EXACTAMENTE:\n"
     "   `Packer.toBuffer(doc).then(b => require('fs').writeFileSync('/home/user/out.docx', b)).catch(e => console.error('SAVE_ERR', e && e.message));`\n"
-    "   Guarda en esa ruta EXACTA. No uses rutas relativas ni otros nombres."
+    "   Guarda en esa ruta EXACTA. No uses rutas relativas ni otros nombres.\n"
+    "API — errores comunes a EVITAR:\n"
+    "- `PageNumber` NO es constructor. Número de página: `new TextRun({ children: [PageNumber.CURRENT] })` "
+    "y total: `[PageNumber.TOTAL_PAGES]`.\n"
+    "- `AlignmentType`, `HeadingLevel`, `BorderStyle`, `WidthType`, `LevelFormat` son ENUMS — úsalos como "
+    "`AlignmentType.CENTER`, nunca con `new`.\n"
+    "- Pie de página: `footers: { default: new Footer({ children: [ new Paragraph({...}) ] }) }` dentro de la section.\n"
+    "- Negrita/itálica/fuente van en `new TextRun({ text, bold:true, italics:true, font:'Arial', size:24 })`.\n"
+    "- Listas numeradas: define `numbering` en el Document y usa `numbering: { reference, level }` en el Paragraph."
 )
 
 RENDER_CODE_SCHEMA = {
@@ -63,8 +71,8 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
             runner = (
                 "import subprocess, glob, os\n"
                 # docx global ya instalado en el template → instantáneo; si no, instala local.
-                "subprocess.run('cd /home/user && (NP=$(npm root -g 2>/dev/null); ([ -n \"$NP\" ] && [ -d \"$NP/docx\" ]) || npm install docx >/dev/null 2>&1)', shell=True)\n"
-                "r = subprocess.run('cd /home/user && NODE_PATH=$(npm root -g 2>/dev/null):/home/user/node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
+                "subprocess.run('cd /home/user && ([ -d /opt/node_libs/node_modules/docx ] || npm install docx >/dev/null 2>&1)', shell=True)\n"
+                "r = subprocess.run('cd /home/user && NODE_PATH=/opt/node_libs/node_modules:/home/user/node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
                 "f = '/home/user/out.docx' if os.path.exists('/home/user/out.docx') else ''\n"
                 "if not f:\n"
                 "    c = sorted(glob.glob('/home/user/*.docx') + glob.glob('/tmp/*.docx'), key=os.path.getmtime)\n"
