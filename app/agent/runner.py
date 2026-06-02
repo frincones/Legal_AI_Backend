@@ -1,28 +1,43 @@
-"""Loop del agente (Sprint 1.1) — streaming real con Claude + bridge SSE + persistencia.
+"""Loop del agente (Sprint 1.2) — Router Haiku + carga de skill + streaming.
 
-Usa el SDK de Anthropic directo (el ReAct loop con tools/plugins del Agent SDK
-entra en sprints posteriores). Emite el contrato de eventos del bridge y persiste
-messages / message_parts / agent_runs / token_ledger con scoping por org_id.
+Flujo: resolver org → candidatos (org_skills) → Router Haiku elige {skill,tier}
+→ cargar SKILL.md (body_md) al system prompt (cacheado) → stream con el modelo del tier.
+Persiste messages/parts/agent_runs/token_ledger. Guardrails como hooks: Fase 2.
 """
 from __future__ import annotations
 
 from typing import AsyncGenerator
 
-from anthropic import AsyncAnthropic
-
 from .. import bridge, db
 from ..auth import Principal
 from ..config import settings
+from .llm import client, tier_to_model
+from .router import route
 from .system_prompts import WORKER_SYSTEM
 
-_client: AsyncAnthropic | None = None
+SKILL_FRAMING = (
+    "[CONTEXTO DE EJECUCIÓN — APP WEB MULTI-TENANT]\n"
+    "Vas a ejecutar el siguiente skill de claude-for-legal. Las rutas tipo `~/.claude/...`, "
+    "los 'matter workspaces' y los archivos de perfil que mencione los gestiona la APLICACIÓN, "
+    "no el filesystem. Si el skill pide leer/escribir un archivo de config o perfil: asume que el "
+    "practice profile aún no está configurado (usa defaults razonables y dilo explícitamente), y "
+    "entrega los outputs en tu respuesta. Aplica SIEMPRE la lógica y los guardrails del skill "
+    "(citation hygiene, work-product header, destination check) aunque las herramientas/MCP no estén "
+    "disponibles todavía.\n\n=== SKILL ===\n"
+)
 
 
-def client() -> AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
+async def _candidates(org_id: str) -> list[dict]:
+    rows = await db.select(
+        "org_skills",
+        f"select=skills(key,name,description)&org_id=eq.{org_id}&enabled=eq.true",
+    )
+    return [r["skills"] for r in rows if r.get("skills")]
+
+
+async def _skill_body(skill_key: str) -> str | None:
+    rows = await db.select("skills", f"select=body_md&key=eq.{skill_key}&limit=1")
+    return rows[0].get("body_md") if rows else None
 
 
 async def _load_history(session_id: str) -> list[dict]:
@@ -45,59 +60,70 @@ async def run_chat(session_id: str, principal: Principal, message: str) -> Async
     org_id = principal.org_id or await db.resolve_org(principal.user_id)
     persist = bool(org_id and settings.supabase_service_role_key)
 
+    # ── Router (Haiku) ──
+    decision = {"skill": None, "tier": "sonnet"}
+    if org_id:
+        try:
+            decision = await route(message, await _candidates(org_id))
+        except Exception:  # noqa: BLE001
+            pass
+    skill_key = decision.get("skill")
+    tier = decision.get("tier", "sonnet")
+    model = tier_to_model(tier)
+
     run_id = None
     assistant_msg_id = None
     history: list[dict] = []
 
     if persist:
         try:
-            await db.upsert(
-                "chat_sessions",
-                {"id": session_id, "org_id": org_id, "user_id": principal.user_id, "title": message[:60]},
-                on_conflict="id",
-            )
+            await db.upsert("chat_sessions",
+                {"id": session_id, "org_id": org_id, "user_id": principal.user_id,
+                 "title": message[:60], "model_tier": tier},
+                on_conflict="id")
             seq = await db.next_seq(session_id)
-            umsg = await db.insert(
-                "messages",
+            umsg = await db.insert("messages",
                 {"org_id": org_id, "session_id": session_id, "seq": seq, "role": "user", "status": "complete"},
-                returning=True,
-            )
-            await db.insert(
-                "message_parts",
-                {"org_id": org_id, "message_id": umsg[0]["id"], "idx": 0, "type": "text", "text": message},
-            )
-            run = await db.insert(
-                "agent_runs",
-                {"org_id": org_id, "session_id": session_id, "agent_key": "worker",
-                 "model": settings.model_worker, "model_tier": "sonnet", "status": "running"},
-                returning=True,
-            )
+                returning=True)
+            await db.insert("message_parts",
+                {"org_id": org_id, "message_id": umsg[0]["id"], "idx": 0, "type": "text", "text": message})
+            run = await db.insert("agent_runs",
+                {"org_id": org_id, "session_id": session_id, "agent_key": skill_key or "worker",
+                 "model": model, "model_tier": tier, "status": "running"},
+                returning=True)
             run_id = run[0]["id"]
-            amsg = await db.insert(
-                "messages",
+            amsg = await db.insert("messages",
                 {"org_id": org_id, "session_id": session_id, "seq": seq + 1, "role": "assistant",
-                 "status": "streaming", "model": settings.model_worker},
-                returning=True,
-            )
+                 "status": "streaming", "model": model},
+                returning=True)
             assistant_msg_id = amsg[0]["id"]
             history = await _load_history(session_id)
-        except Exception as exc:  # noqa: BLE001 — degradar a stream sin persistencia
+        except Exception as exc:  # noqa: BLE001
             persist = False
             yield bridge.sse(bridge.ERROR, {"message": f"persist degradado: {exc}", "subtype": "db"})
 
     if not history:
         history = [{"role": "user", "content": message}]
 
-    yield bridge.sse(bridge.AGENT_STEP, {"task_id": session_id, "agent": "worker", "status": "started"})
+    # ── System prompt (+ skill cacheado) ──
+    system_blocks = [{"type": "text", "text": WORKER_SYSTEM}]
+    if skill_key:
+        body = await _skill_body(skill_key)
+        if body:
+            system_blocks.append({
+                "type": "text",
+                "text": SKILL_FRAMING + body,
+                "cache_control": {"type": "ephemeral"},
+            })
+
+    yield bridge.sse(bridge.AGENT_STEP,
+                     {"task_id": session_id, "agent": skill_key or "worker", "tier": tier, "status": "started"})
 
     full = ""
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     try:
         async with client().messages.stream(
-            model=settings.model_worker,
-            max_tokens=2048,
-            system=WORKER_SYSTEM,
-            messages=history,
+            model=model, max_tokens=3072, system=system_blocks, messages=history,
         ) as stream:
             async for text in stream.text_stream:
                 full += text
@@ -105,8 +131,7 @@ async def run_chat(session_id: str, principal: Principal, message: str) -> Async
             final = await stream.get_final_message()
             u = final.usage
             usage = {
-                "input": u.input_tokens,
-                "output": u.output_tokens,
+                "input": u.input_tokens, "output": u.output_tokens,
                 "cache_read": getattr(u, "cache_read_input_tokens", 0) or 0,
                 "cache_write": getattr(u, "cache_creation_input_tokens", 0) or 0,
             }
@@ -115,19 +140,17 @@ async def run_chat(session_id: str, principal: Principal, message: str) -> Async
 
     if persist and assistant_msg_id:
         try:
-            await db.insert(
-                "message_parts",
-                {"org_id": org_id, "message_id": assistant_msg_id, "idx": 0, "type": "text", "text": full},
-            )
+            await db.insert("message_parts",
+                {"org_id": org_id, "message_id": assistant_msg_id, "idx": 0, "type": "text", "text": full})
             await db.patch("messages", f"id=eq.{assistant_msg_id}", {"status": "complete"})
             await db.patch("agent_runs", f"id=eq.{run_id}", {"status": "complete"})
             await db.insert("token_ledger", {
                 "org_id": org_id, "run_id": run_id, "session_id": session_id, "user_id": principal.user_id,
-                "model": settings.model_worker, "input_tokens": usage["input"], "output_tokens": usage["output"],
+                "model": model, "input_tokens": usage["input"], "output_tokens": usage["output"],
                 "cache_read_tokens": usage["cache_read"], "cache_creation_tokens": usage["cache_write"],
             })
         except Exception:  # noqa: BLE001
             pass
 
     yield bridge.sse(bridge.USAGE, usage)
-    yield bridge.sse(bridge.DONE, {"session_id": session_id, "result": "ok"})
+    yield bridge.sse(bridge.DONE, {"session_id": session_id, "result": "ok", "skill": skill_key})
