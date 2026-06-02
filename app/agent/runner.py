@@ -82,6 +82,20 @@ def _intends_document(text: str) -> bool:
     return any(p in t for p in _DOC_INTENT)
 
 
+_DOC_VERBS = ("elabora", "redacta", "genera", "prepara", "escribe", "dame", "crea", "hazme",
+              "haz un", "haz una", "necesito un", "necesito una", "quiero un", "quiero una",
+              "arma un", "arma una", "redáctame", "redactame", "elabórame", "elaborame")
+_DOC_NOUNS = ("poder", "memo", "memorando", "memorándum", "carta", "contrato", "acta", "minuta",
+              "demanda", "cláusula", "clausula", "documento", "escrito", "dictamen", "oficio",
+              "borrador", "machote", "tabla", "schedule", "redline", "convenio", "acuerdo")
+
+
+def _wants_document(text: str) -> bool:
+    """Detecta intención de ENTREGABLE en el mensaje del usuario."""
+    t = (text or "").lower()
+    return any(v in t for v in _DOC_VERBS) and any(n in t for n in _DOC_NOUNS)
+
+
 def _assistant_content(blocks) -> list[dict]:
     out = []
     for b in blocks:
@@ -159,6 +173,7 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     full = ""
     artifacts: list[dict] = []
     nudged = False
+    wants_doc = _wants_document(message)
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
     try:
@@ -180,8 +195,9 @@ async def run_chat(session_id: str, principal: Principal, message: str,
 
             tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
             if final.stop_reason != "tool_use" or not tool_uses:
-                # Anti "announce-and-stop": anunció generar documento pero no llamó la tool → un empujón.
-                if not artifacts and not nudged and _intends_document(turn_text):
+                # Anti "announce-and-stop" / texto-en-vez-de-tool: el usuario pidió un entregable
+                # (o el modelo dijo que lo generaría) pero no se creó artifact → un empujón a la tool.
+                if not artifacts and not nudged and (wants_doc or _intends_document(turn_text)):
                     nudged = True
                     convo.append({"role": "assistant", "content": _assistant_content(final.content)})
                     convo.append({"role": "user", "content":
