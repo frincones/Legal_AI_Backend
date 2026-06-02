@@ -1,14 +1,13 @@
-"""Registro de tools del agente (Sprint 1.3): document tools T5.
+"""Registro de tools del agente: schemas para Anthropic + dispatcher.
 
-Schemas para la API de Anthropic + dispatcher que ejecuta, sube a Storage,
-crea artifacts/artifact_versions y devuelve un resumen para el modelo.
+Document tools (T5, plantilla) + render_document_code (E2B) + RAG + web + run_code.
 """
 from __future__ import annotations
 
 import uuid
 
 from .. import db
-from . import code, documents, rag, storage, web
+from . import code, codedoc, documents, rag, storage, web
 
 # ── Schemas (tool-use de Anthropic) ──
 TOOL_SCHEMAS = [
@@ -31,7 +30,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "render_letter",
-        "description": "Genera una CARTA formal en DOCX (demanda, C&D, respuesta, carta al cliente). Úsalo cuando el usuario pida una carta entregable.",
+        "description": "Genera una CARTA formal en DOCX (demanda, C&D, respuesta, carta al cliente). Úsalo cuando el usuario pida una carta entregable simple.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -58,12 +57,43 @@ TOOL_SCHEMAS = [
         },
     },
 ]
-
-TOOL_SCHEMAS.extend([rag.SEARCH_SCHEMA, web.WEB_SEARCH_SCHEMA, web.WEB_FETCH_SCHEMA, code.RUN_CODE_SCHEMA])
-# Sprint 2.5 · prompt caching: cachea TODAS las defs de tools (prefijo estable) marcando la última.
+TOOL_SCHEMAS.extend([codedoc.RENDER_CODE_SCHEMA, rag.SEARCH_SCHEMA,
+                     web.WEB_SEARCH_SCHEMA, web.WEB_FETCH_SCHEMA, code.RUN_CODE_SCHEMA])
+# Sprint 2.5 · prompt caching: cachea TODAS las defs de tools marcando la última.
 TOOL_SCHEMAS[-1]["cache_control"] = {"type": "ephemeral"}
 
-KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "table"}
+KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "table",
+         "render_document_code": "document"}
+
+
+async def _store(ctx: dict, title: str, kind: str, data: bytes, md: str) -> tuple[str, dict | None]:
+    org_id = ctx["org_id"]
+    artifact_id = str(uuid.uuid4())
+    path = f"org/{org_id}/artifacts/{artifact_id}/v1.docx"
+    try:
+        await storage.ensure_bucket()
+        await storage.upload(path, data)
+        url = await storage.signed_url(path)
+    except Exception as exc:  # noqa: BLE001
+        return (f"documento generado pero falló el guardado: {exc}", None)
+
+    version_id = None
+    try:
+        await db.insert("artifacts", {
+            "id": artifact_id, "org_id": org_id, "session_id": ctx.get("session_id"),
+            "matter_id": ctx.get("matter_id"), "title": title, "kind": kind,
+            "created_by": ctx.get("user_id")})
+        ver = await db.insert("artifact_versions", {
+            "org_id": org_id, "artifact_id": artifact_id, "version": 1,
+            "content": md, "storage_path": path, "authored_by": "agent"}, returning=True)
+        version_id = ver[0]["id"] if ver else None
+        await db.patch("artifacts", f"id=eq.{artifact_id}", {"current_version_id": version_id})
+    except Exception:  # noqa: BLE001
+        pass
+
+    artifact = {"id": artifact_id, "kind": kind, "title": title, "version": 1,
+                "uri": url, "version_id": version_id}
+    return (f"Documento '{title}' generado y guardado (artifact {artifact_id}, v1). Disponible para descarga.", artifact)
 
 
 async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
@@ -76,6 +106,11 @@ async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
         return (await web.web_fetch(args.get("url", ""), ctx.get("org_id")), None)
     if name == "run_code":
         return (await code.run_code(args.get("code", "")), None)
+    if name == "render_document_code":
+        data, err = await codedoc.build(args.get("code", ""))
+        if err or not data:
+            return (f"error generando documento por código: {err}", None)
+        return await _store(ctx, args.get("title", "documento"), "document", data, args.get("code", "")[:2000])
 
     gen = documents.GENERATORS.get(name)
     if not gen:
@@ -84,36 +119,4 @@ async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
         data, md = gen(**args)
     except Exception as exc:  # noqa: BLE001
         return (f"error generando documento: {exc}", None)
-
-    org_id = ctx["org_id"]
-    title = args.get("title", "documento")
-    artifact_id = str(uuid.uuid4())
-    path = f"org/{org_id}/artifacts/{artifact_id}/v1.docx"
-
-    try:
-        await storage.ensure_bucket()
-        await storage.upload(path, data)
-        url = await storage.signed_url(path)
-    except Exception as exc:  # noqa: BLE001
-        return (f"documento generado pero falló el guardado: {exc}", None)
-
-    version_id = None
-    try:
-        art = await db.insert("artifacts", {
-            "id": artifact_id, "org_id": org_id, "session_id": ctx.get("session_id"),
-            "matter_id": ctx.get("matter_id"), "title": title, "kind": KINDS.get(name, "document"),
-            "created_by": ctx.get("user_id"),
-        }, returning=True)
-        ver = await db.insert("artifact_versions", {
-            "org_id": org_id, "artifact_id": artifact_id, "version": 1,
-            "content": md, "storage_path": path, "authored_by": "agent",
-        }, returning=True)
-        version_id = ver[0]["id"] if ver else None
-        await db.patch("artifacts", f"id=eq.{artifact_id}", {"current_version_id": version_id})
-    except Exception:  # noqa: BLE001
-        pass
-
-    artifact = {"id": artifact_id, "kind": KINDS.get(name, "document"),
-                "title": title, "version": 1, "uri": url, "version_id": version_id}
-    summary = f"Documento '{title}' generado y guardado (artifact {artifact_id}, v1). Disponible para descarga."
-    return (summary, artifact)
+    return await _store(ctx, args.get("title", "documento"), KINDS.get(name, "document"), data, md)

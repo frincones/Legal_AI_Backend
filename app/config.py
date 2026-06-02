@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Embeddings (modelo local fastembed)
     embedding_model: str = "BAAI/bge-small-en-v1.5"
 
+    # Extended thinking (0 = desactivado). budget < max_tokens.
+    thinking_budget: int = 1536
+
     # CORS — orígenes del frontend (coma-separados)
     cors_origins: str = "*"
 

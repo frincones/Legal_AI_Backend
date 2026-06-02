@@ -42,6 +42,19 @@ async def _skill_body(skill_key: str) -> str | None:
     return rows[0].get("body_md") if rows else None
 
 
+async def _profile_block(org_id: str) -> str | None:
+    try:
+        rows = await db.select("company_profiles", f"org_id=eq.{org_id}&select=body_md,primary_jurisdiction&limit=1")
+    except Exception:  # noqa: BLE001
+        return None
+    if not rows:
+        return None
+    juris = rows[0].get("primary_jurisdiction") or "no especificada"
+    body = rows[0].get("body_md") or ""
+    return (f"[PERFIL DE LA FIRMA — jurisdicción principal: {juris}]\n{body}\n"
+            "Si el usuario no especifica jurisdicción, usa la del perfil; NO la infieras de resultados web.")
+
+
 async def _attachment_context(doc_ids: list[str], org_id: str) -> str | None:
     snippets = []
     for did in (doc_ids or [])[:5]:
@@ -100,7 +113,11 @@ def _assistant_content(blocks) -> list[dict]:
     out = []
     for b in blocks:
         t = getattr(b, "type", None)
-        if t == "text":
+        if t == "thinking":
+            out.append({"type": "thinking", "thinking": b.thinking, "signature": b.signature})
+        elif t == "redacted_thinking":
+            out.append({"type": "redacted_thinking", "data": b.data})
+        elif t == "text":
             out.append({"type": "text", "text": b.text})
         elif t == "tool_use":
             out.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
@@ -151,6 +168,8 @@ async def run_chat(session_id: str, principal: Principal, message: str,
         history = [{"role": "user", "content": message}]
 
     system_blocks = [{"type": "text", "text": WORKER_SYSTEM}]
+    if org_id and (prof := await _profile_block(org_id)):
+        system_blocks.append({"type": "text", "text": prof})
     if skill_key and (body := await _skill_body(skill_key)):
         system_blocks.append({"type": "text", "text": SKILL_FRAMING + body, "cache_control": {"type": "ephemeral"}})
 
@@ -179,12 +198,20 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     try:
         for _ in range(MAX_ITERS):
             turn_text = ""
-            async with client().messages.stream(
-                model=model, max_tokens=4096, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo,
-            ) as stream:
-                async for text in stream.text_stream:
-                    turn_text += text
-                    yield bridge.sse(bridge.TEXT_DELTA, {"text": text, "message_id": session_id})
+            kwargs = dict(model=model, max_tokens=4096, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo)
+            if settings.thinking_budget and tier in ("sonnet", "opus"):
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": settings.thinking_budget}
+            async with client().messages.stream(**kwargs) as stream:
+                async for ev in stream:
+                    if getattr(ev, "type", None) != "content_block_delta":
+                        continue
+                    d = ev.delta
+                    dt = getattr(d, "type", None)
+                    if dt == "text_delta":
+                        turn_text += d.text
+                        yield bridge.sse(bridge.TEXT_DELTA, {"text": d.text, "message_id": session_id})
+                    elif dt == "thinking_delta":
+                        yield bridge.sse(bridge.THINKING, {"text": d.thinking, "message_id": session_id})
                 final = await stream.get_final_message()
             full += turn_text
             u = final.usage
