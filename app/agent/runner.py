@@ -258,7 +258,14 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             results = []
             for tu in tool_uses:
                 yield bridge.sse(bridge.TOOL_CALL, {"id": tu.id, "name": tu.name, "input": tu.input})
-                summary, artifact = await exec_tool(tu.name, tu.input, ctx)
+                # Heartbeats mientras la tool corre (E2B/npm puede tardar) → la conexión SSE no se resetea.
+                task = asyncio.create_task(exec_tool(tu.name, tu.input, ctx))
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=10)
+                    if done:
+                        break
+                    yield bridge.heartbeat()
+                summary, artifact = task.result()
                 if artifact:
                     artifacts.append(artifact)
                     yield bridge.sse(bridge.ARTIFACT, artifact)
