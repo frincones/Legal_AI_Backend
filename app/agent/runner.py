@@ -228,9 +228,9 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                     nudged = True
                     convo.append({"role": "assistant", "content": _assistant_content(final.content)})
                     convo.append({"role": "user", "content":
-                        "Procede AHORA: llama la herramienta de documento "
-                        "(render_letter / render_memo / build_table_doc) y genera el entregable con el "
-                        "contenido que ya preparaste. No respondas solo con texto."})
+                        "Procede AHORA: genera el documento llamando la herramienta "
+                        "(render_document_code / render_letter / render_memo). Si faltan datos, usa "
+                        "PLACEHOLDERS entre corchetes [ASÍ]. NO pidas más información; NO respondas solo con texto."})
                     continue
                 break
 
