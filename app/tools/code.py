@@ -9,6 +9,7 @@ con el cliente httpx de Storage en el mismo request — ver app/tools/codedoc.py
 from __future__ import annotations
 
 import asyncio
+import os
 
 from ..config import settings
 
@@ -24,9 +25,10 @@ def _run_sync(code: str, api_key: str) -> str:
         from e2b_code_interpreter import Sandbox
     except Exception as exc:  # noqa: BLE001
         return f"[run_code: SDK E2B no disponible: {exc}]"
+    os.environ["E2B_API_KEY"] = api_key  # el Sandbox síncrono lee la key del entorno
     sbx = None
     try:
-        sbx = Sandbox(api_key=api_key)
+        sbx = Sandbox()
         ex = sbx.run_code(code)
         out = "".join(ex.logs.stdout) if ex.logs and ex.logs.stdout else ""
         err = "".join(ex.logs.stderr) if ex.logs and ex.logs.stderr else ""

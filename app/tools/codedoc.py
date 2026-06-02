@@ -11,6 +11,7 @@ AsyncClient instance"). Aislarlo en un hilo evita esa interferencia.
 from __future__ import annotations
 
 import asyncio
+import os
 
 from ..config import settings
 
@@ -46,9 +47,10 @@ def _build_sync(code: str, api_key: str) -> tuple[bytes | None, str | None]:
         from e2b_code_interpreter import Sandbox
     except Exception as exc:  # noqa: BLE001
         return None, f"SDK E2B no disponible: {exc}"
+    os.environ["E2B_API_KEY"] = api_key  # el Sandbox síncrono lee la key del entorno
     sbx = None
     try:
-        sbx = Sandbox(api_key=api_key)
+        sbx = Sandbox()
         ex = sbx.run_code(_PREP + (code or ""))
         if getattr(ex, "error", None):
             return None, f"{ex.error.name}: {ex.error.value}"
