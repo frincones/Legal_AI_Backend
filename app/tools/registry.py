@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 
 from .. import db
-from . import code, codedoc, documents, rag, storage, web
+from . import code, codedoc, documents, rag, storage, verificar_fuente, web
 
 # ── Schemas (tool-use de Anthropic) ──
 TOOL_SCHEMAS = [
@@ -57,8 +57,8 @@ TOOL_SCHEMAS = [
         },
     },
 ]
-TOOL_SCHEMAS.extend([codedoc.RENDER_CODE_SCHEMA, rag.SEARCH_SCHEMA,
-                     web.WEB_SEARCH_SCHEMA, web.WEB_FETCH_SCHEMA, code.RUN_CODE_SCHEMA])
+TOOL_SCHEMAS.extend([codedoc.RENDER_CODE_SCHEMA, verificar_fuente.VERIFICAR_FUENTE_SCHEMA,
+                     rag.SEARCH_SCHEMA, web.WEB_SEARCH_SCHEMA, web.WEB_FETCH_SCHEMA, code.RUN_CODE_SCHEMA])
 # Sprint 2.5 · prompt caching: cachea TODAS las defs de tools marcando la última.
 TOOL_SCHEMAS[-1]["cache_control"] = {"type": "ephemeral"}
 
@@ -104,6 +104,10 @@ async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
         return (await web.web_search(args.get("query", "")), None)
     if name == "web_fetch":
         return (await web.web_fetch(args.get("url", ""), ctx.get("org_id")), None)
+    if name == "verificar_fuente":
+        summary, records = await verificar_fuente.verificar(args.get("consultas", []), ctx)
+        ctx.setdefault("vf_records", []).extend(records)  # para el citation linter (F4)
+        return (summary, None)
     if name == "run_code":
         return (await code.run_code(args.get("code", "")), None)
     if name == "render_document_code":

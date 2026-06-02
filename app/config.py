@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # Extended thinking (0 = desactivado). budget < max_tokens.
     thinking_budget: int = 1536
 
+    # verificar_fuente — motor de verificación/grounding legal (Colombia)
+    vf_enabled: bool = True
+    vf_ttl_vigente_days: int = 30        # una norma vigente puede cambiar → revalidar
+    vf_ttl_derogada_days: int = 3650     # derogada/inexequible no "revive"
+    vf_ttl_no_encontrada_days: int = 1   # reintentar pronto
+    vf_max_fetch: int = 3                # tope de fetches por consulta
+    vf_max_saltos: int = 2               # tope de saltos (índice→documento)
+    vf_max_consultas: int = 8            # tope de citas por llamada (batch)
+
     # CORS — orígenes del frontend (coma-separados)
     cors_origins: str = "*"
 

@@ -30,38 +30,38 @@ WEB_FETCH_SCHEMA = {
 }
 
 
-async def web_search(query: str, count: int = 5) -> str:
+async def search_raw(query: str, count: int = 5, allowed_domains: list[str] | None = None) -> list[dict]:
+    """Búsqueda Brave → lista de {title,url,description}. allowed_domains acota con site:."""
     if not settings.brave_search_api_key:
-        return "[web_search no configurado]"
+        return []
+    q = query
+    if allowed_domains:
+        sites = " OR ".join(f"site:{d}" for d in allowed_domains)
+        q = f"{query} ({sites})"
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get(
-                settings.brave_search_endpoint if hasattr(settings, "brave_search_endpoint")
-                else "https://api.search.brave.com/res/v1/web/search",
+                settings.brave_search_endpoint,
                 headers={"X-Subscription-Token": settings.brave_search_api_key, "Accept": "application/json"},
-                params={"q": query, "count": count},
+                params={"q": q, "count": count},
             )
             r.raise_for_status()
-            results = (r.json().get("web") or {}).get("results", [])[:count]
-    except Exception as exc:  # noqa: BLE001
-        return f"[web_search error: {exc}]"
-    if not results:
-        return _untrusted("sin resultados", "brave")
-    lines = [f"- {x.get('title')} ({x.get('url')})\n  {x.get('description', '')}" for x in results]
-    return _untrusted("\n".join(lines), "brave")
+            return (r.json().get("web") or {}).get("results", [])[:count]
+    except Exception:  # noqa: BLE001
+        return []
 
 
-async def web_fetch(url: str, org_id: str | None = None, max_chars: int = 8000) -> str:
-    # caché
+async def fetch_raw(url: str, org_id: str | None = None, max_chars: int = 12000) -> str:
+    """Trae markdown crudo (sin envoltura _untrusted) vía Firecrawl, con caché web_cache."""
     if org_id:
         try:
             cached = await db.select("web_cache", f"org_id=eq.{org_id}&url=eq.{url}&select=content_md&limit=1")
             if cached and cached[0].get("content_md"):
-                return _untrusted(cached[0]["content_md"][:max_chars], url)
+                return cached[0]["content_md"][:max_chars]
         except Exception:  # noqa: BLE001
             pass
     if not settings.firecrawl_api_key:
-        return "[web_fetch no configurado]"
+        return ""
     try:
         async with httpx.AsyncClient(timeout=45) as c:
             r = await c.post(
@@ -71,8 +71,8 @@ async def web_fetch(url: str, org_id: str | None = None, max_chars: int = 8000) 
             )
             r.raise_for_status()
             md = ((r.json().get("data") or {}).get("markdown")) or ""
-    except Exception as exc:  # noqa: BLE001
-        return f"[web_fetch error: {exc}]"
+    except Exception:  # noqa: BLE001
+        return ""
     md = md[:max_chars]
     if org_id and md:
         try:
@@ -80,4 +80,21 @@ async def web_fetch(url: str, org_id: str | None = None, max_chars: int = 8000) 
                             on_conflict="org_id,url")
         except Exception:  # noqa: BLE001
             pass
+    return md
+
+
+async def web_search(query: str, count: int = 5) -> str:
+    if not settings.brave_search_api_key:
+        return "[web_search no configurado]"
+    results = await search_raw(query, count)
+    if not results:
+        return _untrusted("sin resultados", "brave")
+    lines = [f"- {x.get('title')} ({x.get('url')})\n  {x.get('description', '')}" for x in results]
+    return _untrusted("\n".join(lines), "brave")
+
+
+async def web_fetch(url: str, org_id: str | None = None, max_chars: int = 8000) -> str:
+    if not settings.firecrawl_api_key:
+        return "[web_fetch no configurado]"
+    md = await fetch_raw(url, org_id, max_chars)
     return _untrusted(md or "[sin contenido]", url)

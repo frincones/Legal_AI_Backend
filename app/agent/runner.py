@@ -111,6 +111,18 @@ def _wants_document(text: str) -> bool:
     return any(v in t for v in _DOC_VERBS) and any(n in t for n in _DOC_NOUNS)
 
 
+# Documentos que típicamente CITAN normas/jurisprudencia → disparan el gate de verificación.
+_FUNDAMENTED = ("demanda", "contrato", "concepto", "recurso", "tutela", "petición", "peticion",
+                "dictamen", "escritura", "convenio", "acuerdo", "acción", "accion", "alegato")
+_DOC_RENDER = ("render_document_code", "render_memo", "render_letter", "build_table_doc")
+
+
+def _needs_verification(message: str) -> bool:
+    """True si el entregable va a fundamentarse en derecho (gate research-before-draft)."""
+    t = (message or "").lower()
+    return bool(guardrails.detect_legal_refs(message)) or any(n in t for n in _FUNDAMENTED)
+
+
 def _assistant_content(blocks, include_thinking: bool = True) -> list[dict]:
     out = []
     for b in blocks:
@@ -184,7 +196,8 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     yield bridge.sse(bridge.AGENT_STEP,
                      {"task_id": session_id, "agent": skill_key or "worker", "tier": tier, "status": "started"})
 
-    ctx = {"org_id": org_id, "session_id": session_id, "matter_id": None, "user_id": principal.user_id}
+    ctx = {"org_id": org_id, "session_id": session_id, "matter_id": None,
+           "user_id": principal.user_id, "run_id": run_id, "vf_records": []}
     convo = list(history)
     # ── Adjuntos (Sprint 1.4): inyecta contenido del adjunto como DATA no confiable ──
     if document_ids and org_id and convo and convo[-1]["role"] == "user":
@@ -195,6 +208,8 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     artifacts: list[dict] = []
     nudged = False
     doc_code_fails = 0  # tope de reintentos lentos de E2B → fallback rápido a plantilla
+    verified_done = False  # ¿ya corrió verificar_fuente este turno?
+    gate_fired = False     # el gate research-before-draft solo intercepta una vez
     wants_doc = _wants_document(message)
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
@@ -261,13 +276,27 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             results = []
             for tu in tool_uses:
                 yield bridge.sse(bridge.TOOL_CALL, {"id": tu.id, "name": tu.name, "input": tu.input})
+                # Gate research-before-draft: si va a generar un entregable fundamentado en derecho
+                # y aún no verificó fuentes, intercepta UNA vez y exige verificar primero.
+                if (tu.name in _DOC_RENDER and not verified_done and not gate_fired
+                        and _needs_verification(message)):
+                    gate_fired = True
+                    summary, artifact = (
+                        "ANTES de generar el documento debes verificar las fuentes. Llama PRIMERO "
+                        "`verificar_fuente` con TODAS las normas, artículos y sentencias que vas a citar "
+                        "(en batch). Luego genera el documento citando SOLO lo verificado e indicando la "
+                        "fuente; lo no verificable márcalo [verificar contra fuente primaria].", None)
                 # Tope: si render_document_code (E2B, lento) ya falló una vez este turno, no lo reintentes
                 # más; fuerza el fallback rápido a plantilla. Evita 4× instalaciones lentas → reset SSE.
-                if tu.name == "render_document_code" and doc_code_fails >= 2:
+                elif tu.name == "render_document_code" and doc_code_fails >= 2:
                     summary, artifact = (
                         "render_document_code no disponible tras un fallo previo. Genera el documento "
                         "AHORA con render_letter o render_memo (plantilla rápida).", None)
                 else:
+                    if tu.name == "verificar_fuente":
+                        cs = tu.input.get("consultas") if isinstance(tu.input, dict) else None
+                        yield bridge.sse("verify_progress",
+                                         {"status": "started", "consultas": cs or [], "message_id": session_id})
                     # Heartbeats mientras la tool corre → la conexión SSE no se resetea.
                     task = asyncio.create_task(exec_tool(tu.name, tu.input, ctx))
                     while True:
@@ -276,6 +305,9 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                             break
                         yield bridge.heartbeat()
                     summary, artifact = task.result()
+                    if tu.name == "verificar_fuente":
+                        verified_done = True
+                        yield bridge.sse("verify_progress", {"status": "done", "message_id": session_id})
                     if tu.name == "render_document_code" and artifact is None:
                         doc_code_fails += 1
                 if artifact:
@@ -296,9 +328,10 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                if is_transient(exc) else str(exc))
         yield bridge.sse(bridge.ERROR, {"message": msg, "subtype": "anthropic"})
 
-    # ── Guardrails (post): citation linter ──
+    # ── Guardrails (post): citation linter (enforcement con registros verificados) ──
     if org_id and full:
-        note = await guardrails.lint_citations(full, org_id, session_id=session_id, run_id=run_id)
+        note = await guardrails.lint_citations(full, org_id, session_id=session_id, run_id=run_id,
+                                               vf_records=ctx.get("vf_records"))
         if note:
             yield bridge.sse(bridge.TEXT_DELTA, {"text": note, "message_id": session_id})
             full += note
