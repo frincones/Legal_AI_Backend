@@ -25,22 +25,9 @@ _DOCX_GUIDE = (
     "   CRÍTICO: docx-js usa A4 por defecto — fija SIEMPRE US Letter (width 12240, height 15840).\n"
     "3. Fuente Arial, tamaño 24 (12pt). Títulos en negrita.\n"
     "4. Campos a completar = placeholders en NEGRITA entre corchetes: `new TextRun({ text: '[NOMBRE]', bold: true })`.\n"
-    "5. NO guardes el archivo tú: el sistema toma la variable `doc` y la guarda automáticamente. "
-    "Solo deja `doc` construida al nivel superior."
-)
-
-# El sistema guarda `doc` (o `document`) en /home/user/out.docx — el modelo no necesita guardar.
-_SAVE_WRAPPER = (
-    "\n;(async () => {\n"
-    "  try {\n"
-    "    const __docx = require('docx');\n"
-    "    let __d = (typeof doc !== 'undefined') ? doc : ((typeof document !== 'undefined') ? document : null);\n"
-    "    if (!__d) { console.log('NO_DOC_VAR'); return; }\n"
-    "    const __b = await __docx.Packer.toBuffer(__d);\n"
-    "    require('fs').writeFileSync('/home/user/out.docx', __b);\n"
-    "    console.log('SAVED_OK');\n"
-    "  } catch (e) { console.log('SAVE_ERR ' + (e && e.message)); }\n"
-    "})();\n"
+    "5. TERMINA SIEMPRE el código (al nivel superior, NO dentro de funciones) con EXACTAMENTE:\n"
+    "   `Packer.toBuffer(doc).then(b => require('fs').writeFileSync('/home/user/out.docx', b)).catch(e => console.error('SAVE_ERR', e && e.message));`\n"
+    "   Guarda en esa ruta EXACTA. No uses rutas relativas ni otros nombres."
 )
 
 RENDER_CODE_SCHEMA = {
@@ -72,7 +59,7 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
         except Exception:  # noqa: BLE001
             sbx = await AsyncSandbox.create(api_key=api_key)
         try:
-            await sbx.files.write("/home/user/gen.js", js_code + _SAVE_WRAPPER)
+            await sbx.files.write("/home/user/gen.js", js_code)
             runner = (
                 "import subprocess, glob, os\n"
                 # docx global ya instalado en el template → instantáneo; si no, instala local.
@@ -80,7 +67,7 @@ def _build_blocking(js_code: str, api_key: str) -> tuple[bytes | None, str | Non
                 "r = subprocess.run('cd /home/user && NODE_PATH=$(npm root -g 2>/dev/null):/home/user/node_modules node gen.js', shell=True, capture_output=True, text=True)\n"
                 "f = '/home/user/out.docx' if os.path.exists('/home/user/out.docx') else ''\n"
                 "if not f:\n"
-                "    c = sorted(glob.glob('/home/user/*.docx'), key=os.path.getmtime)\n"
+                "    c = sorted(glob.glob('/home/user/*.docx') + glob.glob('/tmp/*.docx'), key=os.path.getmtime)\n"
                 "    f = c[-1] if c else ''\n"
                 "print('__FOUND__' + f + '__OUT__' + (r.stdout or '')[:400] + ' || ' + (r.stderr or '')[:500] + '__END__')\n"
             )
