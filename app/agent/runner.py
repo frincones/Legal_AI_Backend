@@ -123,6 +123,26 @@ def _needs_verification(message: str) -> bool:
     return bool(guardrails.detect_legal_refs(message)) or any(n in t for n in _FUNDAMENTED)
 
 
+def _mark_cache(messages: list[dict]) -> None:
+    """Marca el último bloque del último mensaje con cache_control (1 solo breakpoint de
+    conversación). Cachea el prefijo (historial + adjuntos + resultados de verificación) a
+    1/10 del precio en las iteraciones y turnos siguientes. Riesgo de calidad: cero."""
+    for m in messages:  # limpia marcas previas → exactamente 1 breakpoint de conversación
+        c = m.get("content")
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    b.pop("cache_control", None)
+    if not messages:
+        return
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1]["cache_control"] = {"type": "ephemeral"}
+
+
 def _assistant_content(blocks, include_thinking: bool = True) -> list[dict]:
     out = []
     for b in blocks:
@@ -185,13 +205,16 @@ async def run_chat(session_id: str, principal: Principal, message: str,
     if org_id and (prof := await _profile_block(org_id)):
         system_blocks.append({"type": "text", "text": prof})
     if skill_key and (body := await _skill_body(skill_key)):
-        system_blocks.append({"type": "text", "text": SKILL_FRAMING + body, "cache_control": {"type": "ephemeral"}})
+        system_blocks.append({"type": "text", "text": SKILL_FRAMING + body})
 
     # ── Guardrails (pre) ──
     if org_id:
         notice = await guardrails.pre_checks(principal, org_id, skill_key, session_id=session_id, run_id=run_id)
         if notice:
             system_blocks.append({"type": "text", "text": "[GUARDRAIL] " + notice})
+    # Prompt caching: cachea TODO el system (WORKER + perfil + skill + guardrail) → se lee a 1/10
+    # del precio en cada iteración/turno. (Antes solo se cacheaba el skill, y solo si existía.)
+    system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
 
     yield bridge.sse(bridge.AGENT_STEP,
                      {"task_id": session_id, "agent": skill_key or "worker", "tier": tier, "status": "started"})
@@ -220,6 +243,7 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             final = None
             # 16384: el código docx-js de documentos largos (contratos, demandas) puede ser extenso;
             # con max_tokens=4096 se truncaba el input.code de render_document_code → quedaba vacío.
+            _mark_cache(convo)  # cachea el prefijo de la conversación (historial + adjuntos + verificación)
             kwargs = dict(model=model, max_tokens=16384, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo)
             if settings.thinking_budget and tier in ("sonnet", "opus"):
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": settings.thinking_budget}

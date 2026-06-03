@@ -360,21 +360,27 @@ async def _verificar_norma(d: dict, org_id: str | None) -> dict:
     nombre = f"{d['tipo'].capitalize()} {d['num']} de {d['anio']}" + (f", art. {d['articulo']}" if d.get("articulo") else "")
     if not cands:
         return _record_vacio(d, nombre, "norma")
-    # fetch en paralelo
-    fetched = await asyncio.gather(*[
-        _fetch_con_saltos(u, a["dominios"], org_id, settings.vf_max_saltos) for u, a in cands])
+    # Sequential-first: fetch+extract de la fuente de mayor autoridad PRIMERO; abanica a las demás
+    # SOLO si la primera no da un estado claro. Recorta ~⅔ las llamadas Haiku (y los fetches) sin
+    # cambiar el `estado` (la fuente autoritativa es la misma); se pierde solo el boost de confianza.
+    cands = sorted(cands, key=lambda x: x[1]["tier"])
+    _CLARO = {"vigente", "vigente_con_modificaciones", "derogada", "derogada_parcial",
+              "inexequible", "inexequible_parcial", "suspendida"}
+    art_txt = f"\nSe consulta específicamente el ARTÍCULO {d['articulo']}." if d.get("articulo") else ""
     extraidos = []
-    for (u, a), md in zip(cands, fetched):
+    for u, a in cands:
+        md = await _fetch_con_saltos(u, a["dominios"], org_id, settings.vf_max_saltos)
         if not md:
             continue
         pf = _prefiltro(md, a.get("hints_extraccion"))
-        art_txt = f"\nSe consulta específicamente el ARTÍCULO {d['articulo']}." if d.get("articulo") else ""
         ext = await _haiku_tool(
             f"Texto oficial de '{nombre}' (fuente {a['entidad']}). Determina su estado de vigencia. "
             f"OJO: 'derogada_por' son las normas que derogan a ESTA norma, no las que ella deroga.{art_txt}\n\n"
             f"<texto>\n{pf}\n</texto>", _NORMA_TOOL)
         if ext.get("estado") and ext["estado"] != "no_encontrada":
             extraidos.append((ext, a, u))
+            if ext["estado"] in _CLARO:  # la fuente de mayor autoridad ya resolvió → no abanicar
+                break
     if not extraidos:
         return _record_vacio(d, nombre, "norma")
     # reconciliar: mayor tier (menor número) gana; corroboración sube confianza
