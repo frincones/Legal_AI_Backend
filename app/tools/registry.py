@@ -114,7 +114,9 @@ async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
         data, err = await codedoc.build(args.get("code", ""))
         if err or not data:
             return (f"error generando documento por código: {err}", None)
-        return await _store(ctx, args.get("title", "documento"), "document", data, args.get("code", "")[:2000])
+        # Guardamos el docx-js COMPLETO (antes truncado a 2000) → habilita edición/versionado y
+        # la biblioteca de patrones reutilizables. El campo content es text (sin límite práctico).
+        return await _store(ctx, args.get("title", "documento"), "document", data, args.get("code", ""))
 
     gen = documents.GENERATORS.get(name)
     if not gen:
