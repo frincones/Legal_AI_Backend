@@ -18,6 +18,8 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str
     document_ids: list[str] | None = None
+    edit_artifact_id: str | None = None   # F3: editar un documento existente → nueva versión
+    selection: str | None = None          # F3: texto seleccionado en el documento (highlight-to-edit)
 
 
 @router.post("/api/chat/{session_id}")
@@ -27,7 +29,8 @@ async def chat(
     principal: Principal = Depends(get_principal),
 ) -> StreamingResponse:
     return StreamingResponse(
-        run_chat(session_id, principal, body.message, body.document_ids),
+        run_chat(session_id, principal, body.message, body.document_ids,
+                 edit_artifact_id=body.edit_artifact_id, selection=body.selection),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

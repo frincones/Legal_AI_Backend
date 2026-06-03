@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 
 from .. import db
-from . import code, codedoc, documents, rag, storage, verificar_fuente, web
+from . import code, codedoc, docblocks, documents, rag, storage, verificar_fuente, web
 
 # ── Schemas (tool-use de Anthropic) ──
 TOOL_SCHEMAS = [
@@ -68,8 +68,27 @@ KINDS = {"render_memo": "memo", "render_letter": "letter", "build_table_doc": "t
 
 async def _store(ctx: dict, title: str, kind: str, data: bytes, md: str) -> tuple[str, dict | None]:
     org_id = ctx["org_id"]
-    artifact_id = str(uuid.uuid4())
-    path = f"org/{org_id}/artifacts/{artifact_id}/v1.docx"
+    # Edición (F3): si el turno edita un documento existente, versionamos ese artifact (N+1).
+    edit_target = ctx.get("edit_target") if kind == "document" else None
+
+    # Modelo de bloques + citas (F2) — determinista, $0 LLM, a partir del DOCX ya hecho.
+    blocks: list = []
+    citations: dict = {}
+    if kind == "document":
+        try:
+            blocks, citations = docblocks.to_blocks(data, ctx.get("vf_records"))
+            if edit_target:
+                blocks = docblocks.diff_changed(edit_target.get("prev_blocks"), blocks)
+        except Exception:  # noqa: BLE001
+            blocks, citations = [], {}
+
+    if edit_target and edit_target.get("artifact_id"):
+        artifact_id = edit_target["artifact_id"]
+        version = int(edit_target.get("base_version") or 1) + 1
+    else:
+        artifact_id = str(uuid.uuid4())
+        version = 1
+    path = f"org/{org_id}/artifacts/{artifact_id}/v{version}.docx"
     try:
         await storage.ensure_bucket()
         await storage.upload(path, data)
@@ -79,21 +98,28 @@ async def _store(ctx: dict, title: str, kind: str, data: bytes, md: str) -> tupl
 
     version_id = None
     try:
-        await db.insert("artifacts", {
-            "id": artifact_id, "org_id": org_id, "session_id": ctx.get("session_id"),
-            "matter_id": ctx.get("matter_id"), "title": title, "kind": kind,
-            "created_by": ctx.get("user_id")})
+        if version == 1:
+            await db.insert("artifacts", {
+                "id": artifact_id, "org_id": org_id, "session_id": ctx.get("session_id"),
+                "matter_id": ctx.get("matter_id"), "title": title, "kind": kind,
+                "created_by": ctx.get("user_id")})
         ver = await db.insert("artifact_versions", {
-            "org_id": org_id, "artifact_id": artifact_id, "version": 1,
-            "content": md, "storage_path": path, "authored_by": "agent"}, returning=True)
+            "org_id": org_id, "artifact_id": artifact_id, "version": version,
+            "content": md, "storage_path": path, "authored_by": "agent",
+            "diff_from_version": (version - 1) if version > 1 else None,
+            "blocks": blocks or None}, returning=True)
         version_id = ver[0]["id"] if ver else None
         await db.patch("artifacts", f"id=eq.{artifact_id}", {"current_version_id": version_id})
     except Exception:  # noqa: BLE001
         pass
 
-    artifact = {"id": artifact_id, "kind": kind, "title": title, "version": 1,
+    artifact = {"id": artifact_id, "kind": kind, "title": title, "version": version,
                 "uri": url, "version_id": version_id}
-    return (f"Documento '{title}' generado y guardado (artifact {artifact_id}, v1). Disponible para descarga.", artifact)
+    if kind == "document":
+        artifact["blocks"] = blocks
+        artifact["citations"] = citations
+    verb = f"actualizado a v{version}" if version > 1 else "generado y guardado"
+    return (f"Documento '{title}' {verb} (artifact {artifact_id}, v{version}). Disponible para descarga.", artifact)
 
 
 async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:

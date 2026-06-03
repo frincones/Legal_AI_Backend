@@ -159,7 +159,9 @@ def _assistant_content(blocks, include_thinking: bool = True) -> list[dict]:
 
 
 async def run_chat(session_id: str, principal: Principal, message: str,
-                   document_ids: list[str] | None = None) -> AsyncGenerator[str, None]:
+                   document_ids: list[str] | None = None,
+                   edit_artifact_id: str | None = None,
+                   selection: str | None = None) -> AsyncGenerator[str, None]:
     org_id = principal.org_id or await db.resolve_org(principal.user_id)
     persist = bool(org_id and settings.supabase_service_role_key)
 
@@ -227,6 +229,28 @@ async def run_chat(session_id: str, principal: Principal, message: str,
         actx = await _attachment_context(document_ids, org_id)
         if actx:
             convo[-1] = {"role": "user", "content": f"{convo[-1]['content']}\n\n{actx}"}
+    # ── Edición de documento (F3): carga el docx-js de la versión actual y pide SOLO el cambio.
+    # El modelo parte del código validado → calidad intacta; _store versiona (N+1). Costo: el
+    # docx-js entra como input (cacheado por prompt caching), el output es el código modificado.
+    if edit_artifact_id and org_id and convo and convo[-1]["role"] == "user":
+        try:
+            rows = await db.select(
+                "artifact_versions",
+                f"artifact_id=eq.{edit_artifact_id}&select=version,content,blocks&order=version.desc&limit=1")
+            if rows and rows[0].get("content"):
+                cur = rows[0]
+                ctx["edit_target"] = {"artifact_id": edit_artifact_id,
+                                      "base_version": cur.get("version") or 1,
+                                      "prev_blocks": cur.get("blocks")}
+                sel = f"\nSelección del usuario a modificar: «{(selection or '').strip()[:400]}»" if selection else ""
+                edit_note = (
+                    "[EDICIÓN DE DOCUMENTO EXISTENTE] A continuación está el código docx-js de la versión "
+                    f"actual (v{cur.get('version')}). Aplica ÚNICAMENTE el cambio que pide el usuario y "
+                    "CONSERVA todo lo demás idéntico; vuelve a llamar render_document_code con el docx-js "
+                    f"COMPLETO ya modificado.{sel}\n\n```javascript\n{cur['content']}\n```")
+                convo[-1] = {"role": "user", "content": f"{convo[-1]['content']}\n\n{edit_note}"}
+        except Exception:  # noqa: BLE001
+            pass
     full = ""
     artifacts: list[dict] = []
     nudged = False
