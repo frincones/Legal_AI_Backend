@@ -20,6 +20,7 @@ class ChatRequest(BaseModel):
     document_ids: list[str] | None = None
     edit_artifact_id: str | None = None   # F3: editar un documento existente → nueva versión
     selection: str | None = None          # F3: texto seleccionado en el documento (highlight-to-edit)
+    reuse_patron_id: str | None = None     # F4: reutilizar un patrón de la biblioteca → documento nuevo
 
 
 @router.post("/api/chat/{session_id}")
@@ -30,7 +31,8 @@ async def chat(
 ) -> StreamingResponse:
     return StreamingResponse(
         run_chat(session_id, principal, body.message, body.document_ids,
-                 edit_artifact_id=body.edit_artifact_id, selection=body.selection),
+                 edit_artifact_id=body.edit_artifact_id, selection=body.selection,
+                 reuse_patron_id=body.reuse_patron_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 
 from .. import db
-from . import code, codedoc, docblocks, documents, rag, storage, verificar_fuente, web
+from . import code, codedoc, docblocks, documents, patrones, rag, storage, verificar_fuente, web
 
 # ── Schemas (tool-use de Anthropic) ──
 TOOL_SCHEMAS = [
@@ -118,6 +118,11 @@ async def _store(ctx: dict, title: str, kind: str, data: bytes, md: str) -> tupl
     if kind == "document":
         artifact["blocks"] = blocks
         artifact["citations"] = citations
+        # F4 · flywheel: el docx-js validado se archiva como patrón reutilizable (solo creación,
+        # no en cada edición). Aditivo y defensivo: si falla, no afecta la generación.
+        if version == 1 and md:
+            await patrones.save(ctx, artifact_id, title, kind, md,
+                                params={"materia": ctx.get("materia") or ""})
     verb = f"actualizado a v{version}" if version > 1 else "generado y guardado"
     return (f"Documento '{title}' {verb} (artifact {artifact_id}, v{version}). Disponible para descarga.", artifact)
 

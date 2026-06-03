@@ -35,6 +35,17 @@ async def upload(path: str, data: bytes, content_type: str = DOCX_MIME) -> str:
     return path
 
 
+async def download(path: str) -> bytes:
+    """Descarga bytes de un objeto del bucket (service_role). Para export PDF on-demand."""
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(
+            f"{settings.supabase_url}/storage/v1/object/{BUCKET}/{path}",
+            headers=_h(),
+        )
+        r.raise_for_status()
+        return r.content
+
+
 async def signed_url(path: str, expires: int = 3600) -> str:
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(

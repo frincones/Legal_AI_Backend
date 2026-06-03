@@ -12,6 +12,7 @@ from typing import AsyncGenerator
 from .. import bridge, db
 from ..auth import Principal
 from ..config import settings
+from ..tools import patrones
 from ..tools.registry import TOOL_SCHEMAS, execute as exec_tool
 from . import guardrails
 from .llm import client, is_transient, tier_to_model
@@ -161,7 +162,8 @@ def _assistant_content(blocks, include_thinking: bool = True) -> list[dict]:
 async def run_chat(session_id: str, principal: Principal, message: str,
                    document_ids: list[str] | None = None,
                    edit_artifact_id: str | None = None,
-                   selection: str | None = None) -> AsyncGenerator[str, None]:
+                   selection: str | None = None,
+                   reuse_patron_id: str | None = None) -> AsyncGenerator[str, None]:
     org_id = principal.org_id or await db.resolve_org(principal.user_id)
     persist = bool(org_id and settings.supabase_service_role_key)
 
@@ -249,6 +251,23 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                     "CONSERVA todo lo demás idéntico; vuelve a llamar render_document_code con el docx-js "
                     f"COMPLETO ya modificado.{sel}\n\n```javascript\n{cur['content']}\n```")
                 convo[-1] = {"role": "user", "content": f"{convo[-1]['content']}\n\n{edit_note}"}
+        except Exception:  # noqa: BLE001
+            pass
+    # ── Reutilización de patrón (F4 · flywheel): parte de un docx-js validado de la biblioteca y
+    # adapta SOLO los datos del nuevo caso. Crea un documento NUEVO (no versiona el patrón). Menos
+    # tokens de salida + estructura probada. Aditivo y defensivo: si falla, el agente genera de cero.
+    elif reuse_patron_id and org_id and convo and convo[-1]["role"] == "user":
+        try:
+            pat = await patrones.load(org_id, reuse_patron_id)
+            if pat and pat.get("docx_js"):
+                reuse_note = (
+                    "[REUTILIZAR PLANTILLA DE LA BIBLIOTECA] A continuación está el código docx-js de "
+                    f"una plantilla validada («{pat.get('title')}»). Pártela como base: CONSERVA su "
+                    "estructura, formato y cláusulas, y reemplaza ÚNICAMENTE los datos por los del nuevo "
+                    "caso del usuario. Verifica las fuentes que cambien y vuelve a llamar "
+                    f"render_document_code con el docx-js COMPLETO adaptado.\n\n```javascript\n{pat['docx_js']}\n```")
+                convo[-1] = {"role": "user", "content": f"{convo[-1]['content']}\n\n{reuse_note}"}
+                await patrones.bump_use(reuse_patron_id)
         except Exception:  # noqa: BLE001
             pass
     full = ""
