@@ -95,26 +95,59 @@ def _to_anthropic(tool: dict) -> dict:
     return {"name": tool["slug"], "description": desc, "input_schema": schema}
 
 
-async def tools_for(toolkit_slugs: list[str], limit: int = 40) -> list[dict]:
-    """Schemas de tools (formato Anthropic) de los toolkits dados. Para inyectar al agente."""
-    if not toolkit_slugs:
-        return []
-    slugs = ",".join(toolkit_slugs)
-    st, data = await _req("GET", f"/tools?toolkit_slugs={slugs}&limit={limit}")
-    items = (data or {}).get("items", []) if isinstance(data, dict) else []
-    return [_to_anthropic(t) for t in items if t.get("slug")]
+# Set CURADO de tools de alto valor por toolkit (acota contexto y costo; slugs verificados).
+CORE_TOOLS: dict[str, list[str]] = {
+    "gmail": ["GMAIL_SEND_EMAIL", "GMAIL_FETCH_EMAILS", "GMAIL_CREATE_EMAIL_DRAFT",
+              "GMAIL_REPLY_TO_THREAD", "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", "GMAIL_GET_CONTACTS"],
+    "googlecalendar": ["GOOGLECALENDAR_CREATE_EVENT", "GOOGLECALENDAR_EVENTS_LIST",
+                       "GOOGLECALENDAR_FIND_EVENT", "GOOGLECALENDAR_FIND_FREE_SLOTS",
+                       "GOOGLECALENDAR_DELETE_EVENT", "GOOGLECALENDAR_GET_CURRENT_DATE_TIME"],
+    "googledrive": ["GOOGLEDRIVE_FIND_FILE", "GOOGLEDRIVE_DOWNLOAD_FILE",
+                    "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT", "GOOGLEDRIVE_CREATE_FOLDER", "GOOGLEDRIVE_UPLOAD_FILE"],
+    "googledocs": ["GOOGLEDOCS_CREATE_DOCUMENT_MARKDOWN", "GOOGLEDOCS_GET_DOCUMENT_BY_ID",
+                   "GOOGLEDOCS_SEARCH_DOCUMENTS", "GOOGLEDOCS_UPDATE_DOCUMENT_MARKDOWN"],
+    "googlesheets": ["GOOGLESHEETS_BATCH_GET", "GOOGLESHEETS_BATCH_UPDATE",
+                     "GOOGLESHEETS_CREATE_GOOGLE_SHEET1", "GOOGLESHEETS_GET_SPREADSHEET_INFO"],
+    "outlook": ["OUTLOOK_OUTLOOK_SEND_EMAIL", "OUTLOOK_OUTLOOK_LIST_MESSAGES",
+                "OUTLOOK_OUTLOOK_REPLY_EMAIL", "OUTLOOK_OUTLOOK_CALENDAR_CREATE_EVENT",
+                "OUTLOOK_OUTLOOK_SEARCH_MESSAGES"],
+    "microsoft_teams": ["MICROSOFT_TEAMS_CREATE_MEETING", "MICROSOFT_TEAMS_CHATS_GET_ALL_MESSAGES",
+                        "MICROSOFT_TEAMS_LIST_TEAM_MEMBERS"],
+}
+
+
+async def tools_for(toolkit_slugs: list[str], per_toolkit: int = 8) -> list[dict]:
+    """Schemas de tools (formato Anthropic) de los toolkits, acotado al set curado. Para el agente."""
+    out: list[dict] = []
+    for slug in toolkit_slugs:
+        allow = set(CORE_TOOLS.get(slug, []))
+        st, data = await _req("GET", f"/tools?toolkit_slug={slug}&limit=60")
+        items = (data or {}).get("items", []) if isinstance(data, dict) else []
+        sel = [t for t in items if t.get("slug") in allow] if allow else items[:per_toolkit]
+        out.extend(_to_anthropic(t) for t in sel if t.get("slug"))
+    return out
 
 
 COMPOSIO_TOOL_NAMES: set[str] = set()  # se llena al cargar tools por-turno (dispatch en registry)
 
 
 async def execute(tool_slug: str, user_id: str, arguments: dict,
-                  connected_account_id: str | None = None) -> dict:
-    """Ejecuta una tool de Composio para el usuario (con su connected account)."""
+                  connected_account_id: str | None = None) -> str:
+    """Ejecuta una tool de Composio para el usuario y devuelve un resumen para el modelo."""
+    import json as _json
+    if not available():
+        return "[integración no disponible]"
     body: dict = {"tool_slug": tool_slug, "user_id": user_id, "arguments": arguments or {}}
     if connected_account_id:
         body["connected_account_id"] = connected_account_id
     st, data = await _req("POST", "/tools/execute", body)
-    if isinstance(data, dict):
-        return data
-    return {"successful": False, "error": f"composio execute fallo (HTTP {st})"}
+    if not isinstance(data, dict):
+        return f"[{tool_slug}] error de ejecución (HTTP {st}). ¿La cuenta está conectada?"
+    ok = data.get("successful", data.get("success", True))
+    payload = data.get("data", data.get("response_data", data))
+    try:
+        text = _json.dumps(payload, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        text = str(payload)
+    prefix = "OK" if ok else "ERROR"
+    return f"[{tool_slug} · {prefix}] {text[:3500]}"

@@ -129,6 +129,12 @@ async def _store(ctx: dict, title: str, kind: str, data: bytes, md: str) -> tupl
 
 async def execute(name: str, args: dict, ctx: dict) -> tuple[str, dict | None]:
     """Devuelve (summary_para_el_modelo, artifact_dict_para_el_bridge)."""
+    # F6.5 — Tools de integraciones (Composio): se despachan al broker con el connected account
+    # del usuario actual. Solo activo si el usuario habilitó integraciones este turno (aditivo).
+    if name in ctx.get("composio_tools", ()):  # set vacío si no hay integraciones → cero overhead
+        from . import composio
+        summary = await composio.execute(name, ctx.get("composio_user_id") or ctx.get("user_id"), args)
+        return (summary, None)
     if name == "search_documents":
         return (await rag.search(args.get("query", ""), ctx["org_id"], ctx.get("matter_id")), None)
     if name == "web_search":

@@ -12,7 +12,7 @@ from typing import AsyncGenerator
 from .. import bridge, db
 from ..auth import Principal
 from ..config import settings
-from ..tools import patrones
+from ..tools import composio, patrones
 from ..tools.registry import TOOL_SCHEMAS, execute as exec_tool
 from . import guardrails
 from .llm import client, is_transient, tier_to_model
@@ -270,6 +270,26 @@ async def run_chat(session_id: str, principal: Principal, message: str,
                 await patrones.bump_use(reuse_patron_id)
         except Exception:  # noqa: BLE001
             pass
+    # ── Integraciones del usuario (F6.5 · Composio): inyecta las tools de los toolkits que el
+    # usuario conectó y habilitó (Gmail, Calendar, Drive…). Aditivo: sin integraciones, turn_tools
+    # == TOOL_SCHEMAS (cero cambio de costo/cache). El set cacheado (TOOL_SCHEMAS) queda como prefijo;
+    # las tools de Composio van después del breakpoint de cache → no afectan el cacheo del agente.
+    turn_tools = TOOL_SCHEMAS
+    if org_id and principal.user_id and composio.available():
+        try:
+            rows = await db.select(
+                "user_integrations",
+                f"user_id=eq.{principal.user_id}&status=eq.active&enabled=is.true&select=toolkit")
+            toolkits = sorted({r["toolkit"] for r in rows if r.get("toolkit")})
+            if toolkits:
+                ctools = await composio.tools_for(toolkits)
+                if ctools:
+                    turn_tools = TOOL_SCHEMAS + ctools
+                    ctx["composio_tools"] = {t["name"] for t in ctools}
+                    ctx["composio_user_id"] = principal.user_id
+        except Exception:  # noqa: BLE001
+            pass
+
     full = ""
     artifacts: list[dict] = []
     nudged = False
@@ -287,7 +307,7 @@ async def run_chat(session_id: str, principal: Principal, message: str,
             # 16384: el código docx-js de documentos largos (contratos, demandas) puede ser extenso;
             # con max_tokens=4096 se truncaba el input.code de render_document_code → quedaba vacío.
             _mark_cache(convo)  # cachea el prefijo de la conversación (historial + adjuntos + verificación)
-            kwargs = dict(model=model, max_tokens=16384, system=system_blocks, tools=TOOL_SCHEMAS, messages=convo)
+            kwargs = dict(model=model, max_tokens=16384, system=system_blocks, tools=turn_tools, messages=convo)
             if settings.thinking_budget and tier in ("sonnet", "opus"):
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": settings.thinking_budget}
             for attempt in range(MAX_STREAM_RETRIES):
