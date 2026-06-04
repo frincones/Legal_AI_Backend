@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_jwt_secret: str = ""          # Settings → API → JWT Secret (HS256)
 
+    # Composio — proveedor de integraciones del agente (Google Workspace, Office 365, etc.)
+    composio_api_key: str = ""
+    composio_base: str = "https://backend.composio.dev/api/v3"
+
     # Tools (Fase 2)
     e2b_api_key: str = ""
     brave_search_api_key: str = ""
