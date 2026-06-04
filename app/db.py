@@ -71,6 +71,19 @@ async def resolve_org(user_id: str | None) -> str | None:
     return rows[0]["org_id"] if rows else None
 
 
+async def is_member(user_id: str | None, org_id: str | None) -> bool:
+    """¿El usuario es miembro activo de ese org? Barrera de aislamiento multitenant."""
+    if not user_id or not org_id:
+        return False
+    try:
+        rows = await select(
+            "memberships",
+            f"select=org_id&user_id=eq.{user_id}&org_id=eq.{org_id}&status=eq.active&limit=1")
+        return bool(rows)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def next_seq(session_id: str) -> int:
     rows = await select("messages", f"select=seq&session_id=eq.{session_id}&order=seq.desc&limit=1")
     return (rows[0]["seq"] + 1) if rows else 0
