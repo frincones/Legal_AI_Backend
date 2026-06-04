@@ -73,7 +73,9 @@ async def list_connections(user_id: str) -> list[dict]:
     for it in items:
         tkslug = (it.get("toolkit") or {}).get("slug") or it.get("toolkit_slug")
         out.append({"toolkit": tkslug, "connected_account_id": it.get("id") or it.get("nanoid"),
-                    "status": it.get("status")})
+                    # Composio devuelve el status en MAYÚSCULA ("ACTIVE"); normalizamos a minúscula
+                    # para que coincida con los filtros (UI 'connected' y la inyección de tools).
+                    "status": (it.get("status") or "").lower()})
     return out
 
 

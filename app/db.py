@@ -49,6 +49,13 @@ async def patch(table: str, query: str, row: dict) -> None:
         r.raise_for_status()
 
 
+async def delete_rows(table: str, query: str) -> None:
+    """DELETE scope-ado por query (PostgREST). El caller DEBE incluir filtros (ej. user_id)."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.delete(f"{_rest()}/{table}?{query}", headers=_headers())
+        r.raise_for_status()
+
+
 async def select(table: str, query: str) -> list:
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(f"{_rest()}/{table}?{query}", headers=_headers())

@@ -70,12 +70,8 @@ async def connect(body: ConnectIn, principal: Principal = Depends(get_principal)
     res = await composio.initiate(uid, body.toolkit, cb)
     if not res or not res.get("redirect_url"):
         return {"ok": False, "error": "no se pudo iniciar la conexión"}
-    try:  # registra fila 'initiated' (se confirma en /sync)
-        await db.insert("user_integrations", {
-            "user_id": uid, "org_id": principal.org_id, "toolkit": body.toolkit,
-            "connected_account_id": res.get("id"), "status": "initiated"})
-    except Exception:  # noqa: BLE001
-        pass
+    # La conexión real se registra en /sync tras el OAuth (con su connected_account_id y status
+    # 'active'). No insertamos placeholder aquí para evitar filas duplicadas/huérfanas.
     return {"ok": True, "redirect_url": res["redirect_url"], "toolkit": body.toolkit}
 
 
@@ -104,9 +100,14 @@ async def sync(principal: Principal = Depends(get_principal)) -> dict:
             else:
                 await db.insert("user_integrations", {
                     "user_id": uid, "org_id": principal.org_id, "toolkit": tk,
-                    "connected_account_id": ca, "status": status, "enabled": True})
+                    "connected_account_id": ca, "status": (status or "").lower(), "enabled": True})
         except Exception:  # noqa: BLE001
             pass
+    # Limpia placeholders huérfanos (sin connected_account_id) ya reemplazados por la conexión real.
+    try:
+        await db.delete_rows("user_integrations", f"user_id=eq.{uid}&connected_account_id=is.null")
+    except Exception:  # noqa: BLE001
+        pass
     return await list_integrations(principal)
 
 
