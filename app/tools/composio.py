@@ -139,14 +139,17 @@ async def execute(tool_slug: str, user_id: str, arguments: dict,
     import json as _json
     if not available():
         return "[integración no disponible]"
-    body: dict = {"tool_slug": tool_slug, "user_id": user_id, "arguments": arguments or {}}
+    # v3: el slug va en el PATH y el body lleva {user_id, arguments}. (No /tools/execute plano.)
+    body: dict = {"user_id": user_id, "arguments": arguments or {}}
     if connected_account_id:
         body["connected_account_id"] = connected_account_id
-    st, data = await _req("POST", "/tools/execute", body)
+    st, data = await _req("POST", f"/tools/execute/{tool_slug}", body)
     if not isinstance(data, dict):
         return f"[{tool_slug}] error de ejecución (HTTP {st}). ¿La cuenta está conectada?"
     ok = data.get("successful", data.get("success", True))
-    payload = data.get("data", data.get("response_data", data))
+    payload = data.get("data", data)
+    if isinstance(payload, dict) and "response_data" in payload:
+        payload = payload["response_data"]
     try:
         text = _json.dumps(payload, ensure_ascii=False)
     except Exception:  # noqa: BLE001
